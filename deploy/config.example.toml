@@ -1,0 +1,11 @@
+[storage]
+db_path = "/var/lib/mcb/memory.db"
+
+[server]
+http_bind = "0.0.0.0:3411"
+
+[capture]
+dedup_window_seconds = 300
+
+[memory]
+session_start_top_n = 8

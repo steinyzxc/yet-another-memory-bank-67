@@ -1,0 +1,17 @@
+services:
+  mcb:
+    image: mcb:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      MCB_STORAGE_DB_PATH: /var/lib/mcb/memory.db
+      MCB_SERVER_HTTP_BIND: 0.0.0.0:3411
+    ports:
+      - "127.0.0.1:3411:3411"
+    volumes:
+      - mcb-data:/var/lib/mcb
+    restart: unless-stopped
+
+volumes:
+  mcb-data:

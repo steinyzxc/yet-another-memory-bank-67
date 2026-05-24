@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -11,6 +12,7 @@ import (
 type Store struct {
 	writeDB *sql.DB
 	readDB  *sql.DB
+	fts5    bool
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -51,6 +53,16 @@ func (s *Store) Close() error {
 	return err
 }
 
+func (s *Store) Ping(ctx context.Context) error {
+	if s == nil || s.readDB == nil {
+		return fmt.Errorf("store is not open")
+	}
+	if err := s.readDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping store: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.writeDB.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -79,9 +91,38 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 CREATE INDEX IF NOT EXISTS observations_hash_ts_idx ON observations(hash, ts);
 CREATE INDEX IF NOT EXISTS observations_session_id_idx ON observations(session_id);
+CREATE TABLE IF NOT EXISTS memories (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	project TEXT NOT NULL,
+	text TEXT NOT NULL,
+	tier TEXT NOT NULL,
+	source TEXT NOT NULL,
+	importance REAL NOT NULL,
+	session_id TEXT REFERENCES sessions(id),
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	accessed_at INTEGER NOT NULL,
+	superseded_by INTEGER REFERENCES memories(id)
+);
+CREATE INDEX IF NOT EXISTS memories_project_created_idx ON memories(project, created_at);
+CREATE INDEX IF NOT EXISTS memories_superseded_by_idx ON memories(superseded_by);
 `)
 	if err != nil {
 		return fmt.Errorf("migrate store: %w", err)
 	}
+	_, err = s.writeDB.ExecContext(ctx, `
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+	text,
+	tokenize = 'unicode61'
+);
+`)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such module: fts5") {
+			s.fts5 = false
+			return nil
+		}
+		return fmt.Errorf("migrate memory fts: %w", err)
+	}
+	s.fts5 = true
 	return nil
 }

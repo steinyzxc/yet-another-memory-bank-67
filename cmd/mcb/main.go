@@ -1,24 +1,148 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
+	"time"
+
+	"github.com/alice/mcb/internal/admin"
+	"github.com/alice/mcb/internal/config"
+	mcbserver "github.com/alice/mcb/internal/server"
+	"github.com/alice/mcb/internal/store"
 )
 
 var version = "dev"
 
+var serveHTTP = func(ctx context.Context, addr string, handler http.Handler) error {
+	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(shutdownCtx)
+		case <-done:
+		}
+	}()
+	err := srv.ListenAndServe()
+	close(done)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
 func main() {
+	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
 	cmd := "serve"
-	if len(os.Args) > 1 {
-		cmd = os.Args[1]
+	if len(args) > 0 {
+		cmd = args[0]
 	}
 	switch cmd {
 	case "version":
-		fmt.Println(version)
+		fmt.Fprintln(stdout, version)
+		return 0
 	case "healthz":
-		fmt.Println("ok")
+		fmt.Fprintln(stdout, "ok")
+		return 0
+	case "serve":
+		return runServe(ctx, args[1:], stderr)
+	case "add", "search":
+		return admin.Run(ctx, args, admin.IO{Stdout: stdout, Stderr: stderr})
 	default:
-		fmt.Fprintf(os.Stderr, "unsupported command %q\n", cmd)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "unsupported command %q\n", cmd)
+		return 2
 	}
+}
+
+type serveOptions struct {
+	dbPath string
+	http   string
+}
+
+func runServe(ctx context.Context, args []string, stderr io.Writer) int {
+	opts, err := parseServeOptions(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
+	}
+	s, err := store.Open(ctx, opts.dbPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "open store: %v\n", err)
+		return 1
+	}
+	defer s.Close()
+	if err := serveHTTP(ctx, opts.http, mcbserver.New(s)); err != nil {
+		fmt.Fprintf(stderr, "serve: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func parseServeOptions(args []string) (serveOptions, error) {
+	configPath := os.Getenv("MCB_CONFIG")
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--config":
+			i++
+			if i >= len(args) {
+				return serveOptions{}, errors.New("missing value for --config")
+			}
+			configPath = args[i]
+		case strings.HasPrefix(arg, "--config="):
+			configPath = strings.TrimPrefix(arg, "--config=")
+		default:
+			filtered = append(filtered, arg)
+		}
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return serveOptions{}, err
+	}
+	opts := serveOptions{dbPath: cfg.Storage.DBPath, http: cfg.Server.HTTPBind}
+	for i := 0; i < len(filtered); i++ {
+		arg := filtered[i]
+		switch {
+		case arg == "--db":
+			i++
+			if i >= len(filtered) {
+				return serveOptions{}, errors.New("missing value for --db")
+			}
+			opts.dbPath = filtered[i]
+		case strings.HasPrefix(arg, "--db="):
+			opts.dbPath = strings.TrimPrefix(arg, "--db=")
+		case arg == "--http" || arg == "--http-bind":
+			i++
+			if i >= len(filtered) {
+				return serveOptions{}, fmt.Errorf("missing value for %s", arg)
+			}
+			opts.http = filtered[i]
+		case strings.HasPrefix(arg, "--http="):
+			opts.http = strings.TrimPrefix(arg, "--http=")
+		case strings.HasPrefix(arg, "--http-bind="):
+			opts.http = strings.TrimPrefix(arg, "--http-bind=")
+		case strings.HasPrefix(arg, "--"):
+			return serveOptions{}, fmt.Errorf("unknown flag %q", arg)
+		default:
+			return serveOptions{}, fmt.Errorf("unexpected argument %q", arg)
+		}
+	}
+	return opts, nil
 }

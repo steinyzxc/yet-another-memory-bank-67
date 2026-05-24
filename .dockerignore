@@ -1,0 +1,6 @@
+.git
+.worktrees
+docs/superpowers
+**/*_test.go
+test
+tmp
