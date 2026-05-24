@@ -1,4 +1,4 @@
-module github.com/alice/mcb
+module github.com/steinyzxc/yet-another-memory-bank-67
 
 go 1.26
 

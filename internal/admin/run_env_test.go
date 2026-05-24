@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/alice/mcb/internal/store"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
 
 func TestRunAddUsesConfiguredStorageDBPath(t *testing.T) {

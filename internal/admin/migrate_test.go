@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alice/mcb/internal/store"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
 
 func TestRunMigrateCreatesDatabase(t *testing.T) {

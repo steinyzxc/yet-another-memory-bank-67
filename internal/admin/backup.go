@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/alice/mcb/internal/config"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/config"
 )
 
 func runBackup(ctx context.Context, args []string, io IO) int {

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alice/mcb/internal/config"
-	"github.com/alice/mcb/internal/store"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/config"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
 
 type doctorOptions struct {

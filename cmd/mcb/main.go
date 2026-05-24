@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alice/mcb/internal/admin"
-	"github.com/alice/mcb/internal/config"
-	mcbserver "github.com/alice/mcb/internal/server"
-	"github.com/alice/mcb/internal/store"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/admin"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/config"
+	mcbserver "github.com/steinyzxc/yet-another-memory-bank-67/internal/server"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
 
 var version = "dev"

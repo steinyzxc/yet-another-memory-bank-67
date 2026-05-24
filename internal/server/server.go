@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alice/mcb/internal/dedup"
-	"github.com/alice/mcb/internal/integrations"
-	"github.com/alice/mcb/internal/secrets"
-	"github.com/alice/mcb/internal/store"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/dedup"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/integrations"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/secrets"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
 
 const dedupWindowSeconds int64 = 300
