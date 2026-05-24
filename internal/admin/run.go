@@ -35,14 +35,42 @@ func Run(ctx context.Context, args []string, io IO) int {
 	}
 
 	switch args[0] {
+	case "migrate":
+		return runMigrate(ctx, args[1:], io)
 	case "add":
 		return runAdd(ctx, args[1:], io)
 	case "search":
 		return runSearch(ctx, args[1:], io)
+	case "sessions":
+		return runSessions(ctx, args[1:], io)
+	case "backup":
+		return runBackup(ctx, args[1:], io)
+	case "doctor":
+		return runDoctor(ctx, args[1:], io)
 	default:
 		fmt.Fprintf(io.Stderr, "unsupported command %q\n", args[0])
 		return 2
 	}
+}
+
+func runMigrate(ctx context.Context, args []string, io IO) int {
+	opts, rest, err := parseOptions(args, io)
+	if err != nil {
+		fmt.Fprintf(io.Stderr, "%v\n", err)
+		return 2
+	}
+	if len(rest) > 0 {
+		fmt.Fprintf(io.Stderr, "unexpected argument %q\n", rest[0])
+		return 2
+	}
+	s, err := store.Open(ctx, opts.dbPath)
+	if err != nil {
+		fmt.Fprintf(io.Stderr, "open store: %v\n", err)
+		return 1
+	}
+	defer s.Close()
+	fmt.Fprintln(io.Stdout, "ok")
+	return 0
 }
 
 func runAdd(ctx context.Context, args []string, io IO) int {
@@ -109,6 +137,35 @@ func runSearch(ctx context.Context, args []string, io IO) int {
 	}
 	for _, result := range results {
 		fmt.Fprintf(io.Stdout, "%d\t%s\n", result.ID, result.Text)
+	}
+	return 0
+}
+
+func runSessions(ctx context.Context, args []string, io IO) int {
+	opts, rest, err := parseOptions(args, io)
+	if err != nil {
+		fmt.Fprintf(io.Stderr, "%v\n", err)
+		return 2
+	}
+	if len(rest) > 0 {
+		fmt.Fprintf(io.Stderr, "unexpected argument %q\n", rest[0])
+		return 2
+	}
+
+	s, err := store.Open(ctx, opts.dbPath)
+	if err != nil {
+		fmt.Fprintf(io.Stderr, "open store: %v\n", err)
+		return 1
+	}
+	defer s.Close()
+
+	sessions, err := s.ListSessions(ctx, opts.project, opts.limit)
+	if err != nil {
+		fmt.Fprintf(io.Stderr, "list sessions: %v\n", err)
+		return 1
+	}
+	for _, session := range sessions {
+		fmt.Fprintf(io.Stdout, "%s\t%s\t%s\t%d\t%d\t%d\n", session.ID, session.Agent, session.Project, session.StartedAt, session.EndedAt, session.NObs)
 	}
 	return 0
 }

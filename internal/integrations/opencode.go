@@ -35,3 +35,27 @@ func NormalizeOpenCodeTool(raw []byte) (Event, error) {
 		PayloadJSON:       payload,
 	}, nil
 }
+
+func NormalizeOpenCodeChat(raw []byte) (Event, error) {
+	var in struct {
+		SessionID string `json:"session_id"`
+		CWD       string `json:"cwd"`
+		Message   string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return Event{}, fmt.Errorf("parse opencode chat event: %w", err)
+	}
+	payload, err := json.Marshal(struct {
+		Message string `json:"message"`
+	}{Message: in.Message})
+	if err != nil {
+		return Event{}, fmt.Errorf("marshal opencode chat payload: %w", err)
+	}
+	return Event{
+		Agent:             "opencode",
+		ExternalSessionID: in.SessionID,
+		CWD:               in.CWD,
+		Kind:              "user_message",
+		PayloadJSON:       payload,
+	}, nil
+}

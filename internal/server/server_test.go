@@ -117,6 +117,99 @@ func TestOpenCodeContextReturnsRecentMemoryContext(t *testing.T) {
 	}
 }
 
+func TestUserPromptEndpointsStoreObservations(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	h := New(s)
+
+	for _, tc := range []struct {
+		name      string
+		path      string
+		body      string
+		sessionID string
+	}{
+		{name: "claude", path: "/hooks/user-prompt", body: `{"session_id":"s1","cwd":"/repo","prompt":"remember this"}`, sessionID: "claude-code:s1"},
+		{name: "opencode", path: "/integrations/opencode/chat", body: `{"session_id":"o1","cwd":"/repo","message":"remember this too"}`, sessionID: "opencode:o1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			count, err := s.ObservationCount(t.Context(), tc.sessionID)
+			if err != nil || count != 1 {
+				t.Fatalf("count=%d err=%v", count, err)
+			}
+		})
+	}
+}
+
+func TestStopEndpointsEndSessions(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	h := New(s)
+
+	for _, tc := range []struct {
+		name      string
+		path      string
+		body      string
+		sessionID string
+	}{
+		{name: "claude stop", path: "/hooks/stop", body: `{"session_id":"s1","cwd":"/repo"}`, sessionID: "claude-code:s1"},
+		{name: "claude subagent stop", path: "/hooks/subagent-stop", body: `{"session_id":"s2","cwd":"/repo"}`, sessionID: "claude-code:s2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			session, err := s.Session(t.Context(), tc.sessionID)
+			if err != nil {
+				t.Fatalf("load session: %v", err)
+			}
+			if session.EndedAt == 0 {
+				t.Fatalf("ended_at was not set: %+v", session)
+			}
+		})
+	}
+}
+
+func TestOpenCodeCompactIsPhaseOneNoOp(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/integrations/opencode/compact", strings.NewReader(`{"session_id":"o1","cwd":"/repo"}`))
+	New(s).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Compact bool   `json:"compact"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if body.Compact || !strings.Contains(body.Reason, "phase 1") {
+		t.Fatalf("body = %+v", body)
+	}
+}
+
 func TestOpenCodeToolEndpointReturnsGenericErrors(t *testing.T) {
 	validBody := `{"session_id":"o1","cwd":"/repo","tool":"read","input":{"file":"a.go"},"output":{"ok":true}}`
 
@@ -178,4 +271,36 @@ func TestOpenCodeToolEndpointReturnsGenericErrors(t *testing.T) {
 			t.Fatalf("body = %q", got)
 		}
 	})
+}
+
+func TestBearerTokenProtectsNonHealthEndpoints(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	h := NewWithOptions(s, Options{BearerToken: "secret"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz status = %d", rec.Code)
+	}
+
+	body := `{"session_id":"o1","cwd":"/repo","tool":"read","input":{"file":"a.go"},"output":{"ok":true}}`
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/integrations/opencode/tool", strings.NewReader(body))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/integrations/opencode/tool", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("authenticated status = %d body=%s", rec.Code, rec.Body.String())
+	}
 }

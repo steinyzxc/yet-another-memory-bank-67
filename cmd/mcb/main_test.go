@@ -30,3 +30,22 @@ func TestRunSupportsAddAndSearchCommands(t *testing.T) {
 		t.Fatalf("search stdout = %q", got)
 	}
 }
+
+func TestRunDispatchesAdminCommands(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "memory.db")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	for _, args := range [][]string{
+		{"migrate", "--db", dbPath},
+		{"sessions", "--db", dbPath, "--project", "/repo"},
+		{"doctor", "--db", dbPath},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		code := run(context.Background(), args, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("%v exit code = %d stderr=%s", args, code, stderr.String())
+		}
+	}
+}

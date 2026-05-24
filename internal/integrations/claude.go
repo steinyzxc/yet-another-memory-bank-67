@@ -35,3 +35,27 @@ func NormalizeClaudePostTool(raw []byte) (Event, error) {
 		PayloadJSON:       payload,
 	}, nil
 }
+
+func NormalizeClaudeUserPrompt(raw []byte) (Event, error) {
+	var in struct {
+		SessionID string `json:"session_id"`
+		CWD       string `json:"cwd"`
+		Prompt    string `json:"prompt"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return Event{}, fmt.Errorf("parse claude user prompt: %w", err)
+	}
+	payload, err := json.Marshal(struct {
+		Prompt string `json:"prompt"`
+	}{Prompt: in.Prompt})
+	if err != nil {
+		return Event{}, fmt.Errorf("marshal claude user prompt: %w", err)
+	}
+	return Event{
+		Agent:             "claude-code",
+		ExternalSessionID: in.SessionID,
+		CWD:               in.CWD,
+		Kind:              "user_message",
+		PayloadJSON:       payload,
+	}, nil
+}

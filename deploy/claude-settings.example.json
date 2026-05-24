@@ -1,0 +1,54 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/session-start -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/post-tool -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/user-prompt -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/stop -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/subagent-stop -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ]
+  }
+}

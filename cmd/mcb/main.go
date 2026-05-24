@@ -62,7 +62,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "serve":
 		return runServe(ctx, args[1:], stderr)
-	case "add", "search":
+	case "migrate", "add", "search", "sessions", "backup", "doctor":
 		return admin.Run(ctx, args, admin.IO{Stdout: stdout, Stderr: stderr})
 	default:
 		fmt.Fprintf(stderr, "unsupported command %q\n", cmd)
@@ -71,8 +71,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 type serveOptions struct {
-	dbPath string
-	http   string
+	dbPath             string
+	http               string
+	dedupWindowSeconds int64
+	sessionStartTopN   int
+	bearerToken        string
 }
 
 func runServe(ctx context.Context, args []string, stderr io.Writer) int {
@@ -87,7 +90,12 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 		return 1
 	}
 	defer s.Close()
-	if err := serveHTTP(ctx, opts.http, mcbserver.New(s)); err != nil {
+	handler := mcbserver.NewWithOptions(s, mcbserver.Options{
+		BearerToken:        opts.bearerToken,
+		DedupWindowSeconds: opts.dedupWindowSeconds,
+		SessionStartTopN:   opts.sessionStartTopN,
+	})
+	if err := serveHTTP(ctx, opts.http, handler); err != nil {
 		fmt.Fprintf(stderr, "serve: %v\n", err)
 		return 1
 	}
@@ -116,7 +124,13 @@ func parseServeOptions(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, err
 	}
-	opts := serveOptions{dbPath: cfg.Storage.DBPath, http: cfg.Server.HTTPBind}
+	opts := serveOptions{
+		dbPath:             cfg.Storage.DBPath,
+		http:               cfg.Server.HTTPBind,
+		dedupWindowSeconds: cfg.Capture.DedupWindowSeconds,
+		sessionStartTopN:   cfg.Memory.SessionStartTopN,
+		bearerToken:        os.Getenv("MCB_BEARER_TOKEN"),
+	}
 	for i := 0; i < len(filtered); i++ {
 		arg := filtered[i]
 		switch {

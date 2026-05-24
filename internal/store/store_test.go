@@ -31,6 +31,49 @@ func TestEnsureSessionCreatesNormalizedSession(t *testing.T) {
 	}
 }
 
+func TestOpenAppliesSchemaVersionMigration(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	err = s.readDB.QueryRowContext(ctx, `SELECT version FROM schema_version ORDER BY version DESC LIMIT 1`).Scan(&version)
+	if err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if version != 1 {
+		t.Fatalf("version = %d, want 1", version)
+	}
+}
+
+func TestListSessionsAndEndSession(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	id, err := s.EnsureSession(ctx, "claude-code", "s1", "/repo", 1000)
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	if err := s.EndSession(ctx, id, 2000); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+
+	sessions, err := s.ListSessions(ctx, "/repo", 10)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != id || sessions[0].EndedAt != 2000 {
+		t.Fatalf("sessions = %+v", sessions)
+	}
+}
+
 func TestInsertObservationDeduplicatesWithinWindow(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "memory.db"))

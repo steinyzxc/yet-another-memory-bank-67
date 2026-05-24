@@ -29,6 +29,46 @@ func TestNormalizeOpenCodeTool(t *testing.T) {
 	assertPayloadJSONValue(t, e.PayloadJSON, "file")
 }
 
+func TestNormalizeClaudeUserPrompt(t *testing.T) {
+	raw := []byte(`{"session_id":"s1","cwd":"/repo","prompt":"remember this"}`)
+	e, err := NormalizeClaudeUserPrompt(raw)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if e.Agent != "claude-code" || e.ExternalSessionID != "s1" || e.CWD != "/repo" || e.Kind != "user_message" || e.Tool != "" {
+		t.Fatalf("bad event: %+v", e)
+	}
+	var payload struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.Unmarshal(e.PayloadJSON, &payload); err != nil {
+		t.Fatalf("parse payload_json: %v", err)
+	}
+	if payload.Prompt != "remember this" {
+		t.Fatalf("prompt = %q", payload.Prompt)
+	}
+}
+
+func TestNormalizeOpenCodeChat(t *testing.T) {
+	raw := []byte(`{"session_id":"o1","cwd":"/repo","message":"remember this too"}`)
+	e, err := NormalizeOpenCodeChat(raw)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if e.Agent != "opencode" || e.ExternalSessionID != "o1" || e.CWD != "/repo" || e.Kind != "user_message" || e.Tool != "" {
+		t.Fatalf("bad event: %+v", e)
+	}
+	var payload struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(e.PayloadJSON, &payload); err != nil {
+		t.Fatalf("parse payload_json: %v", err)
+	}
+	if payload.Message != "remember this too" {
+		t.Fatalf("message = %q", payload.Message)
+	}
+}
+
 func assertPayloadJSONValue(t *testing.T, payloadJSON json.RawMessage, fileKey string) {
 	t.Helper()
 
