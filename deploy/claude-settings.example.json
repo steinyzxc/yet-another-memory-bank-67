@@ -1,4 +1,10 @@
 {
+  "mcpServers": {
+    "mcb": {
+      "type": "http",
+      "url": "http://127.0.0.1:3411/mcp"
+    }
+  },
   "hooks": {
     "SessionStart": [
       {

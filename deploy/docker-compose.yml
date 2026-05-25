@@ -7,6 +7,7 @@ services:
     environment:
       MCB_STORAGE_DB_PATH: /var/lib/mcb/memory.db
       MCB_SERVER_HTTP_BIND: 0.0.0.0:3411
+      MCB_EMBEDDING_PROVIDER: none
     ports:
       - "127.0.0.1:3411:3411"
     volumes:

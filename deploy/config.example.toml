@@ -9,3 +9,29 @@ dedup_window_seconds = 300
 
 [memory]
 session_start_top_n = 8
+decay_tau_days = 30
+min_importance = 0.05
+decay_interval_hours = 24
+
+[embedding]
+provider = "none"
+ollama_url = ""
+model = "nomic-embed-text"
+dimensions = 0
+timeout_ms = 30000
+circuit_breaker_failures = 3
+circuit_breaker_cooldown_ms = 120000
+
+[search]
+bm25_top_k = 50
+vector_top_k = 50
+final_top_k = 10
+rrf_k = 60
+max_per_session = 3
+
+[compaction]
+mode = "subagent"
+min_observations = 5
+max_block_attempts = 2
+attempt_ttl_seconds = 600
+subagent_name = "mcb-compactor"

@@ -12,18 +12,27 @@ import (
 var ErrFTS5Unavailable = errors.New("sqlite fts5 unavailable: rebuild with -tags sqlite_fts5")
 
 type MemoryInput struct {
-	Project   string
-	Text      string
-	Tier      string
-	Source    string
-	SessionID string
-	CreatedAt int64
+	Project    string
+	Text       string
+	Tier       string
+	Source     string
+	Importance float64
+	SessionID  string
+	CreatedAt  int64
 }
 
 type MemorySearch struct {
 	Project string
 	Query   string
 	Limit   int
+}
+
+type MemoryUpdate struct {
+	ID         int64
+	Text       *string
+	Tier       *string
+	Importance *float64
+	UpdatedAt  int64
 }
 
 type Memory struct {
@@ -50,6 +59,10 @@ func (s *Store) AddMemory(ctx context.Context, in MemoryInput) (int64, error) {
 	if source == "" {
 		source = "manual"
 	}
+	importance := in.Importance
+	if importance == 0 {
+		importance = 1.0
+	}
 	createdAt := in.CreatedAt
 	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
@@ -65,7 +78,7 @@ func (s *Store) AddMemory(ctx context.Context, in MemoryInput) (int64, error) {
 	result, err := tx.ExecContext(ctx, `
 INSERT INTO memories (project, text, tier, source, importance, session_id, created_at, updated_at, accessed_at)
 VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?)
-`, in.Project, in.Text, tier, source, 1.0, in.SessionID, createdAt, createdAt, createdAt)
+`, in.Project, in.Text, tier, source, importance, in.SessionID, createdAt, createdAt, createdAt)
 	if err != nil {
 		return 0, fmt.Errorf("insert memory: %w", err)
 	}
@@ -113,6 +126,64 @@ WHERE id = ?
 	memory.SessionID = sessionID.String
 	memory.SupersededBy = supersededBy.Int64
 	return memory, nil
+}
+
+func (s *Store) UpdateMemory(ctx context.Context, update MemoryUpdate) error {
+	if update.ID <= 0 {
+		return fmt.Errorf("memory id is required")
+	}
+	if update.Text == nil && update.Tier == nil && update.Importance == nil {
+		return nil
+	}
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin memory update: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	sets := []string{"updated_at = ?"}
+	args := []any{update.UpdatedAt}
+	if update.Text != nil {
+		sets = append(sets, "text = ?")
+		args = append(args, *update.Text)
+	}
+	if update.Tier != nil {
+		sets = append(sets, "tier = ?")
+		args = append(args, *update.Tier)
+	}
+	if update.Importance != nil {
+		sets = append(sets, "importance = ?")
+		args = append(args, *update.Importance)
+	}
+	args = append(args, update.ID)
+	result, err := tx.ExecContext(ctx, `UPDATE memories SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
+	if err != nil {
+		return fmt.Errorf("update memory: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update memory rows affected: %w", err)
+	}
+	if changed == 0 {
+		return fmt.Errorf("memory %d not found", update.ID)
+	}
+	if update.Text != nil && s.fts5 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memories_fts WHERE rowid = ?`, update.ID); err != nil {
+			return fmt.Errorf("delete old memory fts: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memories_fts (rowid, text) VALUES (?, ?)`, update.ID, *update.Text); err != nil {
+			return fmt.Errorf("insert updated memory fts: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit memory update: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 func (s *Store) SearchMemories(ctx context.Context, search MemorySearch) ([]Memory, error) {

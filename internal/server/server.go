@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/dedup"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/integrations"
+	internalmcp "github.com/steinyzxc/yet-another-memory-bank-67/internal/mcp"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/secrets"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
@@ -22,6 +24,18 @@ type Options struct {
 	BearerToken        string
 	DedupWindowSeconds int64
 	SessionStartTopN   int
+	ReadinessProbe     func(*http.Request) error
+	MCPOptions         internalmcp.Options
+	Compaction         CompactionOptions
+	Now                func() int64
+}
+
+type CompactionOptions struct {
+	Mode              string
+	MinObservations   int
+	MaxBlockAttempts  int
+	AttemptTTLSeconds int64
+	SubagentName      string
 }
 
 func New(s *store.Store) http.Handler {
@@ -34,6 +48,10 @@ func NewWithOptions(s *store.Store, opts Options) http.Handler {
 	}
 	if opts.SessionStartTopN <= 0 {
 		opts.SessionStartTopN = 8
+	}
+	opts.Compaction = normalizeCompaction(opts.Compaction)
+	if opts.Now == nil {
+		opts.Now = func() int64 { return time.Now().UnixMilli() }
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +70,12 @@ func NewWithOptions(s *store.Store, opts Options) http.Handler {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
+		if opts.ReadinessProbe != nil {
+			if err := opts.ReadinessProbe(r); err != nil {
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+				return
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/hooks/post-tool", func(w http.ResponseWriter, r *http.Request) {
@@ -61,10 +85,10 @@ func NewWithOptions(s *store.Store, opts Options) http.Handler {
 		capture(w, r, s, opts, integrations.NormalizeClaudeUserPrompt)
 	})
 	mux.HandleFunc("/hooks/stop", func(w http.ResponseWriter, r *http.Request) {
-		endSession(w, r, s, "claude-code")
+		claudeStop(w, r, s, opts)
 	})
 	mux.HandleFunc("/hooks/subagent-stop", func(w http.ResponseWriter, r *http.Request) {
-		endSession(w, r, s, "claude-code")
+		subagentStop(w, r)
 	})
 	mux.HandleFunc("/hooks/session-start", func(w http.ResponseWriter, r *http.Request) {
 		claudeSessionStart(w, r, s, opts)
@@ -79,8 +103,9 @@ func NewWithOptions(s *store.Store, opts Options) http.Handler {
 		opencodeContext(w, r, s, opts)
 	})
 	mux.HandleFunc("/integrations/opencode/compact", func(w http.ResponseWriter, r *http.Request) {
-		opencodeCompact(w, r, s)
+		opencodeCompact(w, r, s, opts)
 	})
+	mux.Handle("/mcp", internalmcp.New(s, opts.MCPOptions))
 	return recoverMiddleware(authMiddleware(loggingMiddleware(mux), opts.BearerToken))
 }
 
@@ -140,11 +165,16 @@ func claudeSessionStart(w http.ResponseWriter, r *http.Request, s *store.Store, 
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if _, err := s.EnsureSession(r.Context(), "claude-code", in.SessionID, in.CWD, time.Now().UnixMilli()); err != nil {
+	if _, err := s.EnsureSession(r.Context(), "claude-code", in.SessionID, in.CWD, opts.Now()); err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	memories, err := s.RecentMemories(r.Context(), in.CWD, opts.SessionStartTopN)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	summaries, err := s.RecentSessionSummaries(r.Context(), in.CWD, 3)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -160,7 +190,7 @@ func claudeSessionStart(w http.ResponseWriter, r *http.Request, s *store.Store, 
 			AdditionalContext string `json:"additionalContext"`
 		}{
 			HookEventName:     "SessionStart",
-			AdditionalContext: renderMemoryContext(memories),
+			AdditionalContext: renderMemoryContext(memories, summaries, compactorHint("claude-code", opts.Compaction)),
 		},
 	})
 }
@@ -182,7 +212,7 @@ func opencodeContext(w http.ResponseWriter, r *http.Request, s *store.Store, opt
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if _, err := s.EnsureSession(r.Context(), "opencode", in.SessionID, in.CWD, time.Now().UnixMilli()); err != nil {
+	if _, err := s.EnsureSession(r.Context(), "opencode", in.SessionID, in.CWD, opts.Now()); err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -191,11 +221,51 @@ func opencodeContext(w http.ResponseWriter, r *http.Request, s *store.Store, opt
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	summaries, err := s.RecentSessionSummaries(r.Context(), in.CWD, 3)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, struct {
 		AdditionalContext string `json:"additional_context"`
 	}{
-		AdditionalContext: renderMemoryContext(memories),
+		AdditionalContext: renderMemoryContext(memories, summaries, compactorHint("opencode", opts.Compaction)),
 	})
+}
+
+func claudeStop(w http.ResponseWriter, r *http.Request, s *store.Store, opts Options) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		SessionID      string `json:"session_id"`
+		CWD            string `json:"cwd"`
+		StopHookActive bool   `json:"stop_hook_active"`
+	}
+	if err := decodeJSON(w, r, &in); err != nil || in.SessionID == "" || in.CWD == "" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	now := opts.Now()
+	sessionID, err := s.EnsureSession(r.Context(), "claude-code", in.SessionID, in.CWD, now)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	decision, err := requestCompaction(r.Context(), s, sessionID, in.CWD, "claude-code", in.StopHookActive, opts.Compaction, now)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if decision == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}{Decision: "block", Reason: decision})
 }
 
 func endSession(w http.ResponseWriter, r *http.Request, s *store.Store, agent string) {
@@ -228,7 +298,23 @@ func endSession(w http.ResponseWriter, r *http.Request, s *store.Store, agent st
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func opencodeCompact(w http.ResponseWriter, r *http.Request, s *store.Store) {
+func subagentStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := decodeJSON(w, r, &in); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	slog.Info("subagent stop", "session_id", in.SessionID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func opencodeCompact(w http.ResponseWriter, r *http.Request, s *store.Store, opts Options) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -245,20 +331,101 @@ func opencodeCompact(w http.ResponseWriter, r *http.Request, s *store.Store) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	now := time.Now().UnixMilli()
+	now := opts.Now()
 	sessionID, err := s.EnsureSession(r.Context(), "opencode", in.SessionID, in.CWD, now)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if err := s.EndSession(r.Context(), sessionID, now); err != nil {
+	prompt, err := requestCompaction(r.Context(), s, sessionID, in.CWD, "opencode", false, opts.Compaction, now)
+	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if prompt == "" {
+		writeJSON(w, http.StatusOK, struct {
+			Compact bool   `json:"compact"`
+			Reason  string `json:"reason"`
+		}{Compact: false, Reason: "compaction not needed"})
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Compact bool   `json:"compact"`
-		Reason  string `json:"reason"`
-	}{Compact: false, Reason: "phase 1 compaction is disabled"})
+		Prompt  string `json:"prompt"`
+	}{Compact: true, Prompt: prompt})
+}
+
+func requestCompaction(ctx context.Context, s *store.Store, sessionID, project, agent string, stopHookActive bool, cfg CompactionOptions, now int64) (string, error) {
+	if err := s.EndSession(ctx, sessionID, now); err != nil {
+		return "", err
+	}
+	if stopHookActive || cfg.Mode == "disabled" || cfg.Mode == "manual" {
+		return "", nil
+	}
+	needs, err := s.SessionNeedsCompaction(ctx, sessionID, cfg.MinObservations)
+	if err != nil || !needs {
+		return "", err
+	}
+	cutoff := now - cfg.AttemptTTLSeconds*1000
+	if err := s.ExpireCompactionAttempts(ctx, sessionID, cutoff); err != nil {
+		return "", err
+	}
+	fresh, err := s.FreshRequestedCompactionAttempts(ctx, sessionID, cutoff)
+	if err != nil {
+		return "", err
+	}
+	if fresh >= cfg.MaxBlockAttempts {
+		if err := s.InsertCompactionAttempt(ctx, sessionID, "skipped", "max attempts", now); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
+	if err := s.InsertCompactionAttempt(ctx, sessionID, "requested", "", now); err != nil {
+		return "", err
+	}
+	cwds, err := s.SessionCWDs(ctx, sessionID, 10)
+	if err != nil {
+		return "", err
+	}
+	return compactorPrompt(agent, sessionID, project, cwds, cfg.SubagentName), nil
+}
+
+func normalizeCompaction(cfg CompactionOptions) CompactionOptions {
+	if cfg.Mode == "" {
+		cfg.Mode = "subagent"
+	}
+	if cfg.MinObservations <= 0 {
+		cfg.MinObservations = 5
+	}
+	if cfg.MaxBlockAttempts <= 0 {
+		cfg.MaxBlockAttempts = 2
+	}
+	if cfg.AttemptTTLSeconds <= 0 {
+		cfg.AttemptTTLSeconds = 600
+	}
+	if cfg.SubagentName == "" {
+		cfg.SubagentName = "mcb-compactor"
+	}
+	return cfg
+}
+
+func compactorPrompt(agent, sessionID, project string, cwds []string, subagent string) string {
+	data, _ := json.Marshal(cwds)
+	prompt := fmt.Sprintf("session_id=%s project=%s cwds=%s - read observations via mcp__mcb__memory_session_observations, deduplicate against existing memories via mcp__mcb__memory_search, save one summary via mcp__mcb__memory_session_summary_save, then save 3-7 facts via mcp__mcb__memory_save with session_id set.", sessionID, project, string(data))
+	if agent == "claude-code" {
+		return fmt.Sprintf("Before ending, dispatch the %s subagent via the Task tool with subagent_type=%q and this exact prompt: %q Do not ask the user; dispatch immediately. After the subagent reports completion, stop.", subagent, subagent, prompt)
+	}
+	return fmt.Sprintf("Run the %s subagent with this prompt: %s", subagent, prompt)
+}
+
+func compactorHint(agent string, cfg CompactionOptions) string {
+	if cfg.Mode != "subagent" {
+		return ""
+	}
+	if agent == "claude-code" {
+		return fmt.Sprintf("If a Stop hook returns a block decision referencing %s, dispatch it without asking confirmation.", cfg.SubagentName)
+	}
+	return fmt.Sprintf("If mcb plugin requests %s, run that subagent without asking confirmation.", cfg.SubagentName)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
@@ -279,7 +446,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func renderMemoryContext(memories []store.Memory) string {
+func renderMemoryContext(memories []store.Memory, summaries []store.Session, hint string) string {
 	var b strings.Builder
 	b.WriteString("<mcb-context>\n")
 	b.WriteString("## Recent memories\n")
@@ -292,6 +459,19 @@ func renderMemoryContext(memories []store.Memory) string {
 			b.WriteString(text)
 			b.WriteByte('\n')
 		}
+	}
+	if len(summaries) > 0 {
+		b.WriteString("\n## Recent session summaries\n")
+		for _, session := range summaries {
+			b.WriteString("- ")
+			b.WriteString(strings.ReplaceAll(session.Summary, "\n", " "))
+			b.WriteByte('\n')
+		}
+	}
+	if hint != "" {
+		b.WriteString("\n## Compaction\n")
+		b.WriteString(hint)
+		b.WriteByte('\n')
 	}
 	b.WriteString("</mcb-context>")
 	return b.String()

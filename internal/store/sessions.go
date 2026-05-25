@@ -55,12 +55,45 @@ func (s *Store) EndSession(ctx context.Context, id string, endedAt int64) error 
 	return nil
 }
 
-func (s *Store) SaveSessionSummary(ctx context.Context, id, summary string) error {
-	_, err := s.writeDB.ExecContext(ctx, `UPDATE sessions SET summary = ? WHERE id = ?`, summary, id)
+func (s *Store) SaveSessionSummary(ctx context.Context, id, summary string, endedAt int64) error {
+	_, err := s.writeDB.ExecContext(ctx, `UPDATE sessions SET summary = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ?`, summary, endedAt, id)
 	if err != nil {
 		return fmt.Errorf("save session summary: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) RecentSessionSummaries(ctx context.Context, project string, limit int) ([]Session, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+	rows, err := s.readDB.QueryContext(ctx, `
+SELECT id, agent, external_id, project, started_at, ended_at, summary, n_obs
+FROM sessions
+WHERE project = ? AND summary IS NOT NULL AND summary != ''
+ORDER BY COALESCE(ended_at, started_at) DESC, id DESC
+LIMIT ?
+`, project, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent session summaries: %w", err)
+	}
+	defer rows.Close()
+	var sessions []Session
+	for rows.Next() {
+		var session Session
+		var endedAt sql.NullInt64
+		var summary sql.NullString
+		if err := rows.Scan(&session.ID, &session.Agent, &session.ExternalID, &session.Project, &session.StartedAt, &endedAt, &summary, &session.NObs); err != nil {
+			return nil, fmt.Errorf("scan session summary: %w", err)
+		}
+		session.EndedAt = endedAt.Int64
+		session.Summary = summary.String
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate session summaries: %w", err)
+	}
+	return sessions, nil
 }
 
 func (s *Store) ListSessions(ctx context.Context, project string, limit int) ([]Session, error) {

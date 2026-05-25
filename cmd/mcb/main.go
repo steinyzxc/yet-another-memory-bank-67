@@ -12,6 +12,9 @@ import (
 
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/admin"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/config"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/embed"
+	internalmcp "github.com/steinyzxc/yet-another-memory-bank-67/internal/mcp"
+	mcbsearch "github.com/steinyzxc/yet-another-memory-bank-67/internal/search"
 	mcbserver "github.com/steinyzxc/yet-another-memory-bank-67/internal/server"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
@@ -62,7 +65,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "serve":
 		return runServe(ctx, args[1:], stderr)
-	case "migrate", "add", "search", "sessions", "backup", "doctor":
+	case "migrate", "add", "search", "sessions", "backup", "doctor", "embed-missing", "embed-rebuild", "compact", "decay":
 		return admin.Run(ctx, args, admin.IO{Stdout: stdout, Stderr: stderr})
 	default:
 		fmt.Fprintf(stderr, "unsupported command %q\n", cmd)
@@ -76,6 +79,10 @@ type serveOptions struct {
 	dedupWindowSeconds int64
 	sessionStartTopN   int
 	bearerToken        string
+	embedding          config.EmbeddingConfig
+	search             config.SearchConfig
+	memory             config.MemoryConfig
+	compaction         config.CompactionConfig
 }
 
 func runServe(ctx context.Context, args []string, stderr io.Writer) int {
@@ -90,11 +97,36 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 		return 1
 	}
 	defer s.Close()
-	handler := mcbserver.NewWithOptions(s, mcbserver.Options{
+	serverOpts := mcbserver.Options{
 		BearerToken:        opts.bearerToken,
 		DedupWindowSeconds: opts.dedupWindowSeconds,
 		SessionStartTopN:   opts.sessionStartTopN,
-	})
+		Compaction: mcbserver.CompactionOptions{
+			Mode:              opts.compaction.Mode,
+			MinObservations:   opts.compaction.MinObservations,
+			MaxBlockAttempts:  opts.compaction.MaxBlockAttempts,
+			AttemptTTLSeconds: opts.compaction.AttemptTTLSeconds,
+			SubagentName:      opts.compaction.SubagentName,
+		},
+		MCPOptions: internalmcp.Options{
+			SearchConfig: mcbsearch.Config{BM25TopK: opts.search.BM25TopK, VectorTopK: opts.search.VectorTopK, FinalTopK: opts.search.FinalTopK, RRFK: opts.search.RRFK, MaxPerSession: opts.search.MaxPerSession, Model: opts.embedding.Model, Dim: opts.embedding.Dimensions},
+		},
+	}
+	if opts.memory.DecayIntervalHours > 0 {
+		go runDecayTicker(ctx, s, opts.memory)
+	}
+	if opts.embedding.Provider == "ollama" {
+		client := &embed.Client{URL: opts.embedding.OllamaURL, Model: opts.embedding.Model, Dim: opts.embedding.Dimensions, Timeout: time.Duration(opts.embedding.TimeoutMS) * time.Millisecond}
+		serverOpts.MCPOptions.Embedder = client
+		serverOpts.MCPOptions.CircuitBreaker = embed.NewCircuitBreaker(opts.embedding.CircuitBreakerFailures, time.Duration(opts.embedding.CircuitBreakerCooldownMS)*time.Millisecond, nil)
+		serverOpts.ReadinessProbe = func(r *http.Request) error {
+			if !client.Healthy(r.Context()) {
+				return fmt.Errorf("ollama is not ready")
+			}
+			return nil
+		}
+	}
+	handler := mcbserver.NewWithOptions(s, serverOpts)
 	if err := serveHTTP(ctx, opts.http, handler); err != nil {
 		fmt.Fprintf(stderr, "serve: %v\n", err)
 		return 1
@@ -130,6 +162,10 @@ func parseServeOptions(args []string) (serveOptions, error) {
 		dedupWindowSeconds: cfg.Capture.DedupWindowSeconds,
 		sessionStartTopN:   cfg.Memory.SessionStartTopN,
 		bearerToken:        os.Getenv("MCB_BEARER_TOKEN"),
+		embedding:          cfg.Embedding,
+		search:             cfg.Search,
+		memory:             cfg.Memory,
+		compaction:         cfg.Compaction,
 	}
 	for i := 0; i < len(filtered); i++ {
 		arg := filtered[i]
@@ -159,4 +195,17 @@ func parseServeOptions(args []string) (serveOptions, error) {
 		}
 	}
 	return opts, nil
+}
+
+func runDecayTicker(ctx context.Context, s *store.Store, cfg config.MemoryConfig) {
+	ticker := time.NewTicker(time.Duration(cfg.DecayIntervalHours) * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _ = s.DecayMemories(ctx, store.DecayOptions{Now: time.Now().UnixMilli(), TauDays: cfg.DecayTauDays, MinImportance: cfg.MinImportance})
+		}
+	}
 }

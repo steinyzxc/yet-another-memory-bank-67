@@ -80,6 +80,9 @@ func parseDoctorOptions(args []string) (doctorOptions, []string, error) {
 		cfg = config.Default()
 	}
 	opts := doctorOptions{configPath: configPath, dbPath: cfg.Storage.DBPath}
+	if cfg.Embedding.Provider == "ollama" {
+		opts.ollamaURL = cfg.Embedding.OllamaURL
+	}
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -95,6 +98,9 @@ func parseDoctorOptions(args []string) (doctorOptions, []string, error) {
 				return doctorOptions{}, nil, fmt.Errorf("config: %w", err)
 			}
 			opts.dbPath = cfg.Storage.DBPath
+			if cfg.Embedding.Provider == "ollama" {
+				opts.ollamaURL = cfg.Embedding.OllamaURL
+			}
 		case strings.HasPrefix(arg, "--config="):
 			opts.configPath = strings.TrimPrefix(arg, "--config=")
 			cfg, err := config.Load(opts.configPath)
@@ -102,6 +108,9 @@ func parseDoctorOptions(args []string) (doctorOptions, []string, error) {
 				return doctorOptions{}, nil, fmt.Errorf("config: %w", err)
 			}
 			opts.dbPath = cfg.Storage.DBPath
+			if cfg.Embedding.Provider == "ollama" {
+				opts.ollamaURL = cfg.Embedding.OllamaURL
+			}
 		case arg == "--db":
 			i++
 			if i >= len(args) {

@@ -1,0 +1,19 @@
+services:
+  mcb:
+    environment:
+      MCB_EMBEDDING_PROVIDER: "ollama"
+      MCB_EMBEDDING_OLLAMA_URL: "http://ollama:11434"
+      MCB_EMBEDDING_MODEL: "nomic-embed-text"
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mcb-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+
+volumes:
+  ollama-data:
+    name: mcb-ollama-data

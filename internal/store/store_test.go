@@ -44,8 +44,8 @@ func TestOpenAppliesSchemaVersionMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("version = %d, want 1", version)
+	if version != 4 {
+		t.Fatalf("version = %d, want 4", version)
 	}
 }
 

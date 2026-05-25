@@ -56,6 +56,45 @@ func TestReadyzChecksStore(t *testing.T) {
 	}
 }
 
+func TestReadyzChecksConfiguredReadinessProbe(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	h := NewWithOptions(s, Options{ReadinessProbe: func(*http.Request) error { return errNotReady{} }})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServerMountsMCPInitialize(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`))
+	New(s).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"serverInfo"`) || !strings.Contains(rec.Body.String(), `"mcb"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+type errNotReady struct{}
+
+func (errNotReady) Error() string { return "not ready" }
+
 func TestClaudeSessionStartReturnsRecentMemoryContext(t *testing.T) {
 	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
 	if err != nil {
@@ -164,7 +203,6 @@ func TestStopEndpointsEndSessions(t *testing.T) {
 		sessionID string
 	}{
 		{name: "claude stop", path: "/hooks/stop", body: `{"session_id":"s1","cwd":"/repo"}`, sessionID: "claude-code:s1"},
-		{name: "claude subagent stop", path: "/hooks/subagent-stop", body: `{"session_id":"s2","cwd":"/repo"}`, sessionID: "claude-code:s2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -184,7 +222,21 @@ func TestStopEndpointsEndSessions(t *testing.T) {
 	}
 }
 
-func TestOpenCodeCompactIsPhaseOneNoOp(t *testing.T) {
+func TestSubagentStopIsObservabilityOnly(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/hooks/subagent-stop", strings.NewReader(`{"session_id":"s2","cwd":"/repo"}`))
+	New(s).ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOpenCodeCompactReturnsNotNeededWhenSessionIsTooSmall(t *testing.T) {
 	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -205,7 +257,7 @@ func TestOpenCodeCompactIsPhaseOneNoOp(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("parse response: %v", err)
 	}
-	if body.Compact || !strings.Contains(body.Reason, "phase 1") {
+	if body.Compact || !strings.Contains(body.Reason, "not needed") {
 		t.Fatalf("body = %+v", body)
 	}
 }
