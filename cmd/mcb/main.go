@@ -65,7 +65,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "serve":
 		return runServe(ctx, args[1:], stderr)
-	case "migrate", "add", "search", "sessions", "backup", "doctor", "embed-missing", "embed-rebuild", "compact", "decay", "import-jsonl":
+	case "migrate", "add", "search", "sessions", "backup", "doctor", "embed-missing", "embed-rebuild", "compact", "decay", "import-jsonl", "bench":
 		return admin.Run(ctx, args, admin.IO{Stdout: stdout, Stderr: stderr})
 	default:
 		fmt.Fprintf(stderr, "unsupported command %q\n", cmd)

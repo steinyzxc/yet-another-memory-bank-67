@@ -45,6 +45,8 @@ mcb compact --db /var/lib/mcb/memory.db --session claude-code:SESSION --agent cl
 mcb decay --db /var/lib/mcb/memory.db
 mcb sessions --db /var/lib/mcb/memory.db --project /path/to/project
 mcb import-jsonl --db /var/lib/mcb/memory.db ~/.claude/projects
+mcb bench coding-life --out /tmp/mcb-coding-life
+mcb bench longmemeval --dataset /path/to/longmemeval-s.json --out /tmp/mcb-longmemeval --limit 50
 mcb backup --db /var/lib/mcb/memory.db --out backup.db
 mcb backup --db /var/lib/mcb/memory.db --out - > backup.db
 mcb doctor --db /var/lib/mcb/memory.db
@@ -63,6 +65,14 @@ curl -fsS http://127.0.0.1:3411/integrations/replay/session \
 ```
 
 The response contains ordered `events` with stable IDs, timestamps, actor/type, tool name, `payload_preview`, and redacted `payload_detail`.
+
+## Benchmarks
+
+`mcb bench coding-life` runs a bundled clean-room coding-agent retrieval corpus in a sandboxed SQLite database and writes `raw.ndjson`, `summary.json`, `scorecard.md`, and `sandbox.db` to the output directory.
+
+`mcb bench longmemeval --dataset PATH` runs the retrieval-only harness against a user-supplied native LongMemEval-S JSON or JSONL export. Each answerable row must provide `question_id`, `question_type`, `question`, `answer_session_ids`, `haystack_session_ids`, and `haystack_sessions`. Abstention question types ending in `_abs` are skipped, each question is evaluated against a fresh index containing only its haystack sessions, and `--limit N` can be used for smoke runs. No dataset is bundled.
+
+Scorecards compare `mcb local run` against `agentmemory published reference` numbers where available. The coding-life corpus is not the upstream `agentmemory` corpus and the reference is not a same-run baseline. See `docs/benchmarks/2026-05-26-coding-life.md`, `docs/benchmarks/2026-05-26-longmemeval.md`, and `docs/benchmarks/2026-05-26-pre-benchmark-gap-audit.md`.
 
 ## Claude Code Hooks
 

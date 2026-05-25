@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	mcbsearch "github.com/steinyzxc/yet-another-memory-bank-67/internal/search"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
 
@@ -142,6 +143,54 @@ func TestMemorySaveSessionsObservationsProfileAndForgetDelete(t *testing.T) {
 	if _, err := s.Memory(context.Background(), saved.ID); err == nil {
 		t.Fatalf("memory %d still exists", saved.ID)
 	}
+}
+
+func TestMemorySaveStoresEmbeddingWhenEmbedderConfigured(t *testing.T) {
+	s := openTestStore(t)
+	h := New(s, Options{DefaultProject: "/repo", Embedder: mcpFakeEmbedder{vec: []float32{1, 0}}, SearchConfig: mcpFakeSearchConfig("fake-model", 2), Now: func() int64 { return 5000 }})
+
+	result := callTool(t, h, "memory_save", map[string]any{"text": "semantic auth policy"})
+	var saved struct {
+		ID int64 `json:"id"`
+	}
+	mustUnmarshal(t, result, &saved)
+
+	candidates, err := s.VectorCandidates(context.Background(), store.VectorSearch{Project: "/repo", Model: "fake-model", Dim: 2, Limit: 10})
+	if err != nil {
+		t.Fatalf("vector candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].Memory.ID != saved.ID {
+		t.Fatalf("candidates = %+v", candidates)
+	}
+}
+
+func TestMemoryExportSupportsNDJSON(t *testing.T) {
+	s := openTestStore(t)
+	_, err := s.AddMemory(context.Background(), store.MemoryInput{Project: "/repo", Text: "export me", CreatedAt: 1000})
+	if err != nil {
+		t.Fatalf("add memory: %v", err)
+	}
+	h := New(s, Options{DefaultProject: "/repo"})
+
+	result := callTool(t, h, "memory_export", map[string]any{"project": "/repo", "format": "ndjson"})
+	var body struct {
+		Format string `json:"format"`
+		NDJSON string `json:"ndjson"`
+	}
+	mustUnmarshal(t, result, &body)
+	if body.Format != "ndjson" || !strings.Contains(body.NDJSON, `"type":"memory"`) || !strings.Contains(body.NDJSON, "export me") {
+		t.Fatalf("body = %+v", body)
+	}
+}
+
+type mcpFakeEmbedder struct{ vec []float32 }
+
+func (f mcpFakeEmbedder) Embed(context.Context, string) ([]float32, error) { return f.vec, nil }
+func (f mcpFakeEmbedder) Model() string                                    { return "fake-model" }
+func (f mcpFakeEmbedder) Dim() int                                         { return len(f.vec) }
+
+func mcpFakeSearchConfig(model string, dim int) mcbsearch.Config {
+	return mcbsearch.Config{Model: model, Dim: dim}
 }
 
 func openTestStore(t *testing.T) *store.Store {

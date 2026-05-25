@@ -956,6 +956,17 @@ LIMIT 1;
 - **Decay**: `mcb serve` запускает goroutine с `time.NewTicker(decay_interval_hours)` и выполняет decay внутри процесса. `decay_interval_hours = 0` отключает ticker. Отдельная CLI-команда `mcb decay` делает тот же проход вручную. Decay делает `UPDATE memories SET importance = importance * exp(-(now - accessed_at)/(tau_days*86400000))`. После — `DELETE FROM memories WHERE importance < min_importance AND tier != 'procedural'`.
 - **Supersession**: при insert нового semantic-факта искать через BM25 топ-1, если cosine > 0.9 — пометить старый `superseded_by = new.id` вместо delete (для аудита).
 
+## Benchmarks
+
+Benchmark commands are retrieval-only and sandboxed:
+
+- `mcb bench coding-life --out DIR` seeds a clean-room coding-agent corpus into `DIR/sandbox.db` and writes `raw.ndjson`, `summary.json`, and `scorecard.md`.
+- `mcb bench longmemeval --dataset PATH --out DIR [--limit N]` runs the harness against a user-supplied native LongMemEval-S JSON or JSONL export. It skips `_abs` abstention question types, builds a fresh per-question index from `haystack_sessions`, and reports recall_any@5/10/20, MRR, and NDCG@10.
+
+Benchmark scorecards compare `mcb local run` against `agentmemory published reference` numbers when available. They do not copy upstream fixtures and do not run `agentmemory` locally by default. `coding-life-cleanroom` is intentionally not the same corpus as upstream `coding-agent-life-v1`; scorecards must label this difference. LongMemEval scorecards record dataset file name, source URL, row counts, bytes, and SHA-256 before claiming same-dataset comparability.
+
+Before benchmark implementation, `docs/benchmarks/2026-05-26-pre-benchmark-gap-audit.md` audited earlier phase gaps. Blocking pre-benchmark gaps were fixed first: MCP save embeddings, nested Claude JSONL tool classification, NDJSON export, OpenCode compaction prompt injection, and compactor supersession instructions.
+
 ## Зависимости
 
 ```

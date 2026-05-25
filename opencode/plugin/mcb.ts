@@ -270,6 +270,11 @@ export default async function mcbPlugin(ctx?: { worktree?: string; project?: { i
       const result = await post("/integrations/opencode/context", { session_id: sid, cwd: projectPath });
       const context = result?.additional_context || result?.context;
       if (typeof context === "string" && context.length > 0) output.context.push(context);
+      const compact = await post("/integrations/opencode/compact", { session_id: sid, cwd: projectPath, trigger: "experimental.session.compacting" });
+      const prompt = compact?.prompt;
+      if ((compact?.compact || compact?.should_compact) && typeof prompt === "string" && prompt.length > 0) {
+        output.context.push(`<mcb-compaction-request>\n${prompt}\n</mcb-compaction-request>`);
+      }
     },
 
     async config(input: Record<string, unknown>) {

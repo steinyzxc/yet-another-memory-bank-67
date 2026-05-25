@@ -302,7 +302,51 @@ func (s *Server) memorySave(ctx context.Context, raw json.RawMessage) (any, erro
 	if in.SessionID != "" {
 		_ = s.store.MarkCompactionCompleted(ctx, in.SessionID, s.now())
 	}
+	if embeddingErr := s.saveMemoryEmbedding(ctx, id, in.Text); embeddingErr != "" {
+		return map[string]any{"id": id, "embedding_error": embeddingErr}, nil
+	}
 	return map[string]any{"id": id}, nil
+}
+
+type modelEmbedder interface {
+	Model() string
+	Dim() int
+}
+
+func (s *Server) saveMemoryEmbedding(ctx context.Context, id int64, text string) string {
+	if s.opts.Embedder == nil {
+		return ""
+	}
+	if s.opts.CircuitBreaker != nil && s.opts.CircuitBreaker.Open() {
+		return "embedding circuit breaker is open"
+	}
+	vec, err := s.opts.Embedder.Embed(ctx, text)
+	if err != nil {
+		if s.opts.CircuitBreaker != nil {
+			s.opts.CircuitBreaker.RecordFailure()
+		}
+		return err.Error()
+	}
+	if s.opts.CircuitBreaker != nil {
+		s.opts.CircuitBreaker.RecordSuccess()
+	}
+	model := s.opts.SearchConfig.Model
+	dim := s.opts.SearchConfig.Dim
+	if info, ok := s.opts.Embedder.(modelEmbedder); ok {
+		if model == "" {
+			model = info.Model()
+		}
+		if dim <= 0 {
+			dim = info.Dim()
+		}
+	}
+	if dim > 0 && len(vec) != dim {
+		return fmt.Sprintf("embedding dimension = %d, want %d", len(vec), dim)
+	}
+	if err := s.store.SaveMemoryEmbedding(ctx, id, model, vec); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 func (s *Server) ensureNormalizedSession(ctx context.Context, id, project string) error {
@@ -531,6 +575,7 @@ func (s *Server) memoryExport(ctx context.Context, raw json.RawMessage) (any, er
 	var in struct {
 		Project string `json:"project"`
 		Limit   int    `json:"limit"`
+		Format  string `json:"format"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil, fmt.Errorf("invalid export arguments")
@@ -539,7 +584,47 @@ func (s *Server) memoryExport(ctx context.Context, raw json.RawMessage) (any, er
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"memories": memoryDTOs(exported.Memories), "sessions": sessionDTOs(exported.Sessions), "observations": observationDTOs(exported.Observations)}, nil
+	switch strings.ToLower(in.Format) {
+	case "", "json":
+		return map[string]any{"memories": memoryDTOs(exported.Memories), "sessions": sessionDTOs(exported.Sessions), "observations": observationDTOs(exported.Observations)}, nil
+	case "ndjson":
+		ndjson, err := exportNDJSON(exported)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"format": "ndjson", "ndjson": ndjson}, nil
+	default:
+		return nil, fmt.Errorf("unsupported export format %q", in.Format)
+	}
+}
+
+func exportNDJSON(exported store.ExportData) (string, error) {
+	var b strings.Builder
+	writeLine := func(v any) error {
+		data, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+		return nil
+	}
+	for _, memory := range memoryDTOs(exported.Memories) {
+		if err := writeLine(map[string]any{"type": "memory", "memory": memory}); err != nil {
+			return "", fmt.Errorf("marshal memory export: %w", err)
+		}
+	}
+	for _, session := range sessionDTOs(exported.Sessions) {
+		if err := writeLine(map[string]any{"type": "session", "session": session}); err != nil {
+			return "", fmt.Errorf("marshal session export: %w", err)
+		}
+	}
+	for _, observation := range observationDTOs(exported.Observations) {
+		if err := writeLine(map[string]any{"type": "observation", "observation": observation}); err != nil {
+			return "", fmt.Errorf("marshal observation export: %w", err)
+		}
+	}
+	return b.String(), nil
 }
 
 func (s *Server) memoryAudit(ctx context.Context, raw json.RawMessage) (any, error) {

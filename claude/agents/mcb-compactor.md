@@ -7,6 +7,7 @@ tools:
   - mcp__mcb__memory_search
   - mcp__mcb__memory_save
   - mcp__mcb__memory_session_summary_save
+  - mcp__mcb__memory_supersede
 ---
 
 You are a memory-compression subagent for the mcb memory bank.
@@ -20,6 +21,7 @@ Your job:
 3. Save the summary with `mcp__mcb__memory_session_summary_save`.
 4. Call `mcp__mcb__memory_search` with 2-3 short queries from the observations. Do not use `memory_recall` during compaction.
 5. Save 3-7 durable facts with `mcp__mcb__memory_save`.
+6. If a newly saved fact replaces an older conflicting or duplicate memory found by `memory_search`, call `mcp__mcb__memory_supersede` with the old and new memory IDs.
 
 For every saved memory, pass the original `session_id`. Use `semantic`, `procedural`, `episodic`, or `working` tiers. Default importance is 0.5.
 

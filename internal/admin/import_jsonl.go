@@ -239,6 +239,14 @@ func normalizeJSONLUnix(value int64) int64 {
 }
 
 func claudeTranscriptKind(obj map[string]json.RawMessage) string {
+	for _, blockType := range claudeContentBlockTypes(obj) {
+		switch blockType {
+		case "tool_use":
+			return "tool_use"
+		case "tool_result":
+			return "tool_result"
+		}
+	}
 	typ := strings.ToLower(firstJSONLString(obj, "type", "event_type", "eventType"))
 	typ = strings.ReplaceAll(typ, "-", "_")
 	switch {
@@ -266,29 +274,46 @@ func claudeTranscriptKind(obj map[string]json.RawMessage) string {
 }
 
 func inferClaudeToolName(obj map[string]json.RawMessage) string {
-	messageRaw, ok := obj["message"]
-	if !ok {
-		return ""
-	}
-	var message struct {
-		Content json.RawMessage `json:"content"`
-	}
-	if err := json.Unmarshal(messageRaw, &message); err != nil || len(message.Content) == 0 {
-		return ""
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(message.Content, &blocks); err != nil {
-		return ""
-	}
-	for _, block := range blocks {
+	for _, block := range claudeContentBlocks(obj) {
 		if block.Type == "tool_use" && block.Name != "" {
 			return block.Name
 		}
 	}
 	return ""
+}
+
+type claudeContentBlock struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
+func claudeContentBlockTypes(obj map[string]json.RawMessage) []string {
+	blocks := claudeContentBlocks(obj)
+	types := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Type != "" {
+			types = append(types, block.Type)
+		}
+	}
+	return types
+}
+
+func claudeContentBlocks(obj map[string]json.RawMessage) []claudeContentBlock {
+	messageRaw, ok := obj["message"]
+	if !ok {
+		return nil
+	}
+	var message struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(messageRaw, &message); err != nil || len(message.Content) == 0 {
+		return nil
+	}
+	var blocks []claudeContentBlock
+	if err := json.Unmarshal(message.Content, &blocks); err != nil {
+		return nil
+	}
+	return blocks
 }
 
 func importEventHash(transcriptPath, eventID string) string {
