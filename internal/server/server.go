@@ -13,6 +13,7 @@ import (
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/dedup"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/integrations"
 	internalmcp "github.com/steinyzxc/yet-another-memory-bank-67/internal/mcp"
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/replay"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/secrets"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
@@ -81,8 +82,29 @@ func NewWithOptions(s *store.Store, opts Options) http.Handler {
 	mux.HandleFunc("/hooks/post-tool", func(w http.ResponseWriter, r *http.Request) {
 		capture(w, r, s, opts, integrations.NormalizeClaudePostTool)
 	})
+	mux.HandleFunc("/hooks/pre-tool", func(w http.ResponseWriter, r *http.Request) {
+		capture(w, r, s, opts, integrations.NormalizeClaudePreTool)
+	})
+	mux.HandleFunc("/hooks/post-tool-failure", func(w http.ResponseWriter, r *http.Request) {
+		capture(w, r, s, opts, integrations.NormalizeClaudePostToolFailure)
+	})
 	mux.HandleFunc("/hooks/user-prompt", func(w http.ResponseWriter, r *http.Request) {
 		capture(w, r, s, opts, integrations.NormalizeClaudeUserPrompt)
+	})
+	mux.HandleFunc("/hooks/pre-compact", func(w http.ResponseWriter, r *http.Request) {
+		claudePreCompact(w, r, s, opts)
+	})
+	mux.HandleFunc("/hooks/subagent-start", func(w http.ResponseWriter, r *http.Request) {
+		capture(w, r, s, opts, integrations.NormalizeClaudeSubagentStart)
+	})
+	mux.HandleFunc("/hooks/notification", func(w http.ResponseWriter, r *http.Request) {
+		capture(w, r, s, opts, integrations.NormalizeClaudeNotification)
+	})
+	mux.HandleFunc("/hooks/task-completed", func(w http.ResponseWriter, r *http.Request) {
+		capture(w, r, s, opts, integrations.NormalizeClaudeTaskCompleted)
+	})
+	mux.HandleFunc("/hooks/session-end", func(w http.ResponseWriter, r *http.Request) {
+		endSession(w, r, s, "claude-code", opts)
 	})
 	mux.HandleFunc("/hooks/stop", func(w http.ResponseWriter, r *http.Request) {
 		claudeStop(w, r, s, opts)
@@ -99,53 +121,79 @@ func NewWithOptions(s *store.Store, opts Options) http.Handler {
 	mux.HandleFunc("/integrations/opencode/chat", func(w http.ResponseWriter, r *http.Request) {
 		capture(w, r, s, opts, integrations.NormalizeOpenCodeChat)
 	})
+	mux.HandleFunc("/integrations/opencode/event", func(w http.ResponseWriter, r *http.Request) {
+		capture(w, r, s, opts, integrations.NormalizeOpenCodeEvent)
+	})
 	mux.HandleFunc("/integrations/opencode/context", func(w http.ResponseWriter, r *http.Request) {
 		opencodeContext(w, r, s, opts)
 	})
+	mux.HandleFunc("/integrations/opencode/enrich", func(w http.ResponseWriter, r *http.Request) {
+		opencodeEnrich(w, r, s, opts)
+	})
 	mux.HandleFunc("/integrations/opencode/compact", func(w http.ResponseWriter, r *http.Request) {
 		opencodeCompact(w, r, s, opts)
+	})
+	mux.HandleFunc("/integrations/opencode/session-end", func(w http.ResponseWriter, r *http.Request) {
+		endSession(w, r, s, "opencode", opts)
+	})
+	mux.HandleFunc("/integrations/replay/session", func(w http.ResponseWriter, r *http.Request) {
+		replaySession(w, r, s)
 	})
 	mux.Handle("/mcp", internalmcp.New(s, opts.MCPOptions))
 	return recoverMiddleware(authMiddleware(loggingMiddleware(mux), opts.BearerToken))
 }
 
 func capture(w http.ResponseWriter, r *http.Request, s *store.Store, opts Options, normalize func([]byte) (integrations.Event, error)) {
+	if _, ok := captureRaw(w, r, s, opts, normalize); !ok {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func captureRaw(w http.ResponseWriter, r *http.Request, s *store.Store, opts Options, normalize func([]byte) (integrations.Event, error)) (integrations.Event, bool) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+		return integrations.Event{}, false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
+		return integrations.Event{}, false
 	}
 	event, err := normalize(raw)
 	if err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
+		return integrations.Event{}, false
 	}
+	if event.Agent == "" || event.ExternalSessionID == "" || event.CWD == "" || event.Kind == "" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return integrations.Event{}, false
+	}
+	if err := insertCapturedEvent(r.Context(), s, opts, event); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return integrations.Event{}, false
+	}
+	return event, true
+}
+
+func insertCapturedEvent(ctx context.Context, s *store.Store, opts Options, event integrations.Event) error {
 	hash, err := dedup.HashCanonicalJSON(event.PayloadJSON)
 	if err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
+		return err
 	}
 	payload := []byte(secrets.Redact(string(event.PayloadJSON)))
-	_, err = s.InsertObservation(r.Context(), store.ObservationInput{
+	_, err = s.InsertObservation(ctx, store.ObservationInput{
 		Agent:             event.Agent,
 		ExternalSessionID: event.ExternalSessionID,
 		CWD:               event.CWD,
-		TS:                time.Now().UnixMilli(),
+		TS:                opts.Now(),
 		Kind:              event.Kind,
 		Tool:              event.Tool,
 		PayloadJSON:       payload,
 		Hash:              hash,
 	}, opts.DedupWindowSeconds)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	return err
 }
 
 func claudeSessionStart(w http.ResponseWriter, r *http.Request, s *store.Store, opts Options) {
@@ -233,6 +281,97 @@ func opencodeContext(w http.ResponseWriter, r *http.Request, s *store.Store, opt
 	})
 }
 
+func claudePreCompact(w http.ResponseWriter, r *http.Request, s *store.Store, opts Options) {
+	event, ok := captureRaw(w, r, s, opts, integrations.NormalizeClaudePreCompact)
+	if !ok {
+		return
+	}
+	memories, err := s.RecentMemories(r.Context(), event.CWD, opts.SessionStartTopN)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	summaries, err := s.RecentSessionSummaries(r.Context(), event.CWD, 3)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}{
+		HookSpecificOutput: struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		}{
+			HookEventName:     "PreCompact",
+			AdditionalContext: renderMemoryContext(memories, summaries, compactorHint("claude-code", opts.Compaction)),
+		},
+	})
+}
+
+func opencodeEnrich(w http.ResponseWriter, r *http.Request, s *store.Store, opts Options) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		SessionID string   `json:"session_id"`
+		CWD       string   `json:"cwd"`
+		Files     []string `json:"files"`
+	}
+	if err := decodeJSON(w, r, &in); err != nil || in.SessionID == "" || in.CWD == "" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.EnsureSession(r.Context(), "opencode", in.SessionID, in.CWD, opts.Now()); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	context, err := renderFileMemoryContext(r.Context(), s, in.CWD, in.Files)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		AdditionalContext string `json:"additional_context"`
+		Context           string `json:"context"`
+	}{AdditionalContext: context, Context: context})
+}
+
+func replaySession(w http.ResponseWriter, r *http.Request, s *store.Store) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		SessionID string `json:"session_id"`
+		Limit     int    `json:"limit"`
+	}
+	if err := decodeJSON(w, r, &in); err != nil || in.SessionID == "" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	observations, err := s.ListSessionObservations(r.Context(), in.SessionID, normalizeReplayLimit(in.Limit))
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": replay.Records(observations)})
+}
+
+func normalizeReplayLimit(limit int) int {
+	if limit <= 0 {
+		return 100
+	}
+	if limit > 1000 {
+		return 1000
+	}
+	return limit
+}
+
 func claudeStop(w http.ResponseWriter, r *http.Request, s *store.Store, opts Options) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -268,7 +407,7 @@ func claudeStop(w http.ResponseWriter, r *http.Request, s *store.Store, opts Opt
 	}{Decision: "block", Reason: decision})
 }
 
-func endSession(w http.ResponseWriter, r *http.Request, s *store.Store, agent string) {
+func endSession(w http.ResponseWriter, r *http.Request, s *store.Store, agent string, opts Options) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -285,7 +424,7 @@ func endSession(w http.ResponseWriter, r *http.Request, s *store.Store, agent st
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	now := time.Now().UnixMilli()
+	now := opts.Now()
 	sessionID, err := s.EnsureSession(r.Context(), agent, in.SessionID, in.CWD, now)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -475,6 +614,56 @@ func renderMemoryContext(memories []store.Memory, summaries []store.Session, hin
 	}
 	b.WriteString("</mcb-context>")
 	return b.String()
+}
+
+func renderFileMemoryContext(ctx context.Context, s *store.Store, project string, files []string) (string, error) {
+	if len(files) == 0 {
+		return "", nil
+	}
+	memories, err := s.RecentMemories(ctx, project, 100)
+	if err != nil {
+		return "", err
+	}
+	needles := make([]string, 0, len(files))
+	for _, file := range files {
+		file = strings.TrimSpace(file)
+		if file != "" {
+			needles = append(needles, strings.ToLower(file))
+		}
+	}
+	if len(needles) == 0 {
+		return "", nil
+	}
+	var matched []string
+	seen := map[int64]bool{}
+	for _, memory := range memories {
+		text := strings.ToLower(memory.Text)
+		for _, file := range needles {
+			if strings.Contains(text, file) {
+				if !seen[memory.ID] {
+					seen[memory.ID] = true
+					matched = append(matched, strings.ReplaceAll(memory.Text, "\n", " "))
+				}
+				break
+			}
+		}
+		if len(matched) >= 10 {
+			break
+		}
+	}
+	if len(matched) == 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	b.WriteString("<mcb-file-context>\n")
+	b.WriteString("## Relevant file memories\n")
+	for _, text := range matched {
+		b.WriteString("- ")
+		b.WriteString(text)
+		b.WriteByte('\n')
+	}
+	b.WriteString("</mcb-file-context>")
+	return b.String(), nil
 }
 
 func authMiddleware(next http.Handler, bearerToken string) http.Handler {

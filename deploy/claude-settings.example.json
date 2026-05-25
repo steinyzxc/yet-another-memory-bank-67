@@ -26,6 +26,26 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/pre-tool -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/post-tool-failure -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -46,12 +66,62 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/pre-compact -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/subagent-start -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "hooks": [
           {
             "type": "command",
             "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/subagent-stop -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/notification -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/task-completed -H 'Content-Type: application/json' --data @-"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -fsS -X POST http://127.0.0.1:3411/hooks/session-end -H 'Content-Type: application/json' --data @-"
           }
         ]
       }

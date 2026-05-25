@@ -8,7 +8,7 @@ Persistent memory layer для Claude Code и OpenCode. Деплоится од�
 
 Целевая платформа фаз 1-4: **macOS Apple Silicon (arm64) + Docker Desktop + Claude Code/OpenCode**. Linux/Windows и multi-arch release — best-effort/out of scope до отдельного решения.
 
-Функционально: запись observations из tool use и user messages, компрессия сессий в memories через agent-native compactor subagent (диспатчится самим Claude Code/OpenCode, не через mcb), hybrid search (BM25 + векторный) с RRF-фьюжном, инжект релевантного контекста в старт/системный контекст агента.
+Функционально: запись observations из tool use и user messages, импорт Claude JSONL transcripts, replay-friendly session timelines, компрессия сессий в memories через agent-native compactor subagent (диспатчится самим Claude Code/OpenCode, не через mcb), hybrid search (BM25 + векторный) с RRF-фьюжном, инжект релевантного контекста в старт/системный контекст агента.
 
 ## Технологический стек
 
@@ -17,7 +17,7 @@ Persistent memory layer для Claude Code и OpenCode. Деплоится од�
 - **БД**: SQLite через `github.com/mattn/go-sqlite3` (CGO). В контейнере CGO не проблема — build-stage компилирует, runtime-stage минимальный. Это разблокирует `sqlite-vec` extension с фазы 2 без двойной миграции драйвера.
 - **BM25**: SQLite FTS5 (встроенный)
 - **Vector**: фаза 2 — pure Go cosine brute force с project pre-filter (3-15ms на 5-20k per-project, см. секцию «Поиск»). Фаза 3 — `sqlite-vec` extension (SIMD-cosine в C, ×5-10 speedup, никакого Go-ассемблера писать не надо). KD-tree / ball tree / HNSW — не входят в план: при таком scale они дают экономию миллисекунд за счёт значительной complexity. KD/ball tree также вырождаются на 768-dim из-за curse of dimensionality.
-- **MCP SDK**: `github.com/mark3labs/mcp-go` через Streamable HTTP transport (не stdio).
+- **MCP**: stdlib JSON-RPC handler over HTTP at `/mcp` (не stdio, без MCP SDK dependency).
 - **Сжатие payload**: `github.com/klauspost/compress/zstd`
 - **Эмбеддинги**: Ollama HTTP API. Default deploy стартует без Ollama (`provider=none`). Supported embeddings deploy использует соседний контейнер `ollama` через compose overlay и URL `http://ollama:11434`. Модель по умолчанию `nomic-embed-text`.
 - **LLM-компрессия**: делегируется agent-native compactor subagent'у: Claude Code через Task tool, OpenCode через subagent + plugin/command orchestration. Mcb не вызывает LLM-провайдеров напрямую и не хранит API-ключей.
@@ -72,7 +72,7 @@ mcb/
 │   ├── dedup/
 │   │   └── hash.go              # canonical json + sha256
 │   ├── mcp/
-│   │   ├── server.go            # mcp-go Streamable HTTP server, mounted at /mcp
+│   │   ├── server.go            # stdlib JSON-RPC MCP handler, mounted at /mcp
 │   │   ├── tool_recall.go
 │   │   ├── tool_save.go
 │   │   ├── tool_search.go
@@ -187,6 +187,8 @@ SQLite open policy:
 - Admin read-only команды (`search`, `sessions`, `export`) открывают БД read-only и выставляют `PRAGMA query_only = ON`.
 
 Migration policy: в `001_init.sql` можно использовать `NOT NULL` без `DEFAULT`, потому что БД пустая. В будущих миграциях для существующих таблиц `ADD COLUMN ... NOT NULL` только с `DEFAULT` или через copy-table migration.
+
+Phase 3 import idempotency хранится в `imported_events`: `(transcript_path, event_id)` уникальны, `event_id` берётся из Claude transcript `uuid`/`id` или fallback `line:<n>`. Повторный `mcb import-jsonl` пропускает уже записанные события.
 
 ### 001_init.sql
 
@@ -357,10 +359,22 @@ Hooks — это curl-команды, бьющие по HTTP API контейн�
         "command": "curl -fsS --max-time 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/user-prompt"
       }]
     }],
+    "PreToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "curl -fsS --max-time 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/pre-tool"
+      }]
+    }],
     "PostToolUse": [{
       "hooks": [{
         "type": "command",
         "command": "curl -fsS --max-time 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/post-tool"
+      }]
+    }],
+    "PostToolUseFailure": [{
+      "hooks": [{
+        "type": "command",
+        "command": "curl -fsS --max-time 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/post-tool-failure"
       }]
     }],
     "Stop": [{
@@ -369,10 +383,40 @@ Hooks — это curl-команды, бьющие по HTTP API контейн�
         "command": "curl -fsS --max-time 5 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/stop"
       }]
     }],
+    "PreCompact": [{
+      "hooks": [{
+        "type": "command",
+        "command": "curl -fsS --max-time 5 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/pre-compact"
+      }]
+    }],
+    "SubagentStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "curl -fsS --max-time 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/subagent-start"
+      }]
+    }],
     "SubagentStop": [{
       "hooks": [{
         "type": "command",
         "command": "curl -fsS --max-time 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/subagent-stop"
+      }]
+    }],
+    "Notification": [{
+      "hooks": [{
+        "type": "command",
+        "command": "curl -fsS --max-time 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/notification"
+      }]
+    }],
+    "TaskCompleted": [{
+      "hooks": [{
+        "type": "command",
+        "command": "curl -fsS --max-time 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/task-completed"
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "curl -fsS --max-time 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:3411/hooks/session-end"
       }]
     }]
   },
@@ -400,13 +444,24 @@ Hooks — это curl-команды, бьющие по HTTP API контейн�
 |----------|-------|------|---------|
 | `/hooks/session-start` | POST | hook JSON от Claude Code | `application/json` с `hookSpecificOutput.additionalContext` для инжекта контекста |
 | `/hooks/user-prompt` | POST | hook JSON | `text/plain` (опционально доп. контекст) или пусто |
+| `/hooks/pre-tool` | POST | hook JSON | пусто (204) |
 | `/hooks/post-tool` | POST | hook JSON | пусто (204 No Content) |
+| `/hooks/post-tool-failure` | POST | hook JSON | пусто (204) |
+| `/hooks/pre-compact` | POST | hook JSON | `application/json` с `hookSpecificOutput.additionalContext` |
+| `/hooks/subagent-start` | POST | hook JSON | пусто (204) |
 | `/hooks/stop` | POST | hook JSON | либо пусто, либо `application/json` с `{"decision":"block","reason":"..."}` |
 | `/hooks/subagent-stop` | POST | hook JSON | пусто (204) |
+| `/hooks/notification` | POST | hook JSON | пусто (204) |
+| `/hooks/task-completed` | POST | hook JSON | пусто (204) |
+| `/hooks/session-end` | POST | hook JSON | пусто (204) |
 | `/integrations/opencode/tool` | POST | normalized payload от OpenCode plugin `tool.execute.after` | пусто (204) |
-| `/integrations/opencode/message` | POST | normalized user/assistant message от OpenCode plugin | пусто (204) |
+| `/integrations/opencode/event` | POST | normalized lifecycle/message/part event от OpenCode plugin | пусто (204) |
+| `/integrations/opencode/chat` | POST | normalized user/assistant message от OpenCode plugin | пусто (204) |
 | `/integrations/opencode/context` | POST | `{ session_id, cwd }` от plugin system transform | `{ "additional_context": "..." }` или пустой context |
+| `/integrations/opencode/enrich` | POST | `{ session_id, cwd, files }` от plugin system transform | `{ "additional_context": "...", "context": "..." }` |
 | `/integrations/opencode/compact` | POST | `{ session_id, cwd, trigger }` от plugin compaction hook/command | `{ "should_compact": bool, "prompt": string }` |
+| `/integrations/opencode/session-end` | POST | `{ session_id, cwd }` от plugin session delete event | пусто (204) |
+| `/integrations/replay/session` | POST | `{ session_id, limit? }` | ordered `events` with stable IDs, actor/type/tool, payload preview, and redacted payload detail |
 | `/healthz` | GET | — | `200 OK` если БД writable |
 | `/readyz` | GET | — | `200 OK` если БД writable И (provider=none ИЛИ Ollama reachable) |
 | `/mcp` | POST | MCP-протокол | Streamable HTTP MCP responses |
@@ -467,7 +522,7 @@ OpenCode интегрируется через plugin, потому что MCP �
 `opencode/plugin/mcb.ts` использует documented OpenCode plugin hooks:
 
 - `tool.execute.after`: отправляет normalized tool observation в `/integrations/opencode/tool`.
-- `chat.message` или `event`: отправляет user messages в `/integrations/opencode/message`; assistant messages по умолчанию не сохраняются, чтобы не дублировать generated text.
+- `chat.message` или `event`: отправляет user messages в `/integrations/opencode/chat`; assistant messages сохраняются как compact metadata через `/integrations/opencode/event`, без полного generated text.
 - `experimental.chat.system.transform`: запрашивает `/integrations/opencode/context` и добавляет `<mcb-context>` в system messages.
 - `experimental.session.compacting` и `experimental.compaction.autocontinue`: вызывают `/integrations/opencode/compact`; если mcb возвращает prompt, plugin запускает/подталкивает `mcb-compactor` subagent flow перед обычной compaction/autocontinue.
 - `command.execute.before`: опционально поддерживает manual command `/mcb-compact`, который вызывает тот же `/integrations/opencode/compact` path.
@@ -493,9 +548,7 @@ Read observations via mcp__mcb__memory_session_observations, deduplicate with mc
 
 ## MCP-сервер
 
-Поднимается тем же `mcb serve` процессом. Streamable HTTP transport (single HTTP server, MCP смонтирован на `/mcp`).
-
-`mark3labs/mcp-go` поддерживает `streamablehttp.NewServer(...)` — это стандартный MCP transport, замена устаревшего SSE. Один POST endpoint, server-sent events для long-lived ответов, единая URL.
+Поднимается тем же `mcb serve` процессом. MCP смонтирован на `/mcp` как один HTTP POST endpoint со stdlib JSON-RPC routing.
 
 ### Tools
 
@@ -510,6 +563,14 @@ Read observations via mcp__mcb__memory_session_observations, deduplicate with mc
 | `memory_forget` | dry-run: `{ query: string, dry_run: true }`; delete: `{ ids: [int], confirm: true }` | dry-run возвращает кандидатов; delete возвращает `{ deleted: int }` |
 | `memory_supersede` | `{ old_id: int, new_id: int }` | `{ updated: bool }` |
 | `memory_profile` | `{ project: string }` | агрегаты: top концепты, files touched, частые tool names |
+| `memory_update` | `{ id: int, text?: string, tier?: string, importance?: float }` | `{ updated: bool }` |
+| `memory_timeline` | `{ project?: string, session_id?: string, limit?: int }` | chronological memories and observations |
+| `memory_file_history` | `{ project?: string, files: string[], limit?: int }` | memories and observations related to file paths |
+| `memory_patterns` | `{ project?: string, limit?: int }` | recurring tools, observation kinds, and files |
+| `memory_export` | `{ project?: string, limit?: int }` | memories, sessions, and observations as JSON |
+| `memory_audit` | `{ memory_id?: int, limit?: int }` | memory mutation audit events |
+| `memory_verify` | `{ id: int }` | memory provenance with source observations and audit events |
+| `memory_replay` | `{ session_id: string, limit?: int }` | ordered replay records with redacted payload details |
 
 `memory_recall` обновляет `accessed_at = now()` и `access_cnt += 1` для возвращённых записей.
 
@@ -523,15 +584,21 @@ Tools по фазам:
 
 - **Фаза 3**: `memory_recall`, `memory_save`, `memory_search`, `memory_sessions`, `memory_session_observations`, `memory_forget`, `memory_profile`.
 - **Фаза 4**: `memory_session_summary_save`, `memory_supersede`.
+- **Parity Phase 2**: practical tools `memory_update`, `memory_timeline`, `memory_file_history`, `memory_patterns`, `memory_export`, `memory_audit`, `memory_verify`.
+- **Parity Phase 3**: `mcb import-jsonl`, `/integrations/replay/session`, `memory_replay`.
 
 ### Resources
 
 - `mcb://status` — JSON: counts, last write, Ollama reachable
 - `mcb://project/{project}/profile` — то же что `memory_profile`
+- `mcb://memories/latest` — latest active memories
+- `mcb://sessions/latest` — latest sessions
+- `mcb://audit/latest` — latest memory mutation audit events
 
 ### Prompts
 
-Не реализуем в фазе 1.
+- `recall_context` — prompt template for task-focused memory recall.
+- `session_handoff` — prompt template for handoff summary creation.
 
 ## Pipeline: запись наблюдений
 
@@ -893,9 +960,9 @@ LIMIT 1;
 
 ```
 require (
-    github.com/mark3labs/mcp-go v0.x         // Streamable HTTP transport
     github.com/mattn/go-sqlite3 v1.x         // CGO; FTS5 enabled через build tag
     github.com/klauspost/compress v1.x
+    github.com/pelletier/go-toml/v2 v2.x     // config parsing
 )
 ```
 
@@ -1262,7 +1329,7 @@ docker compose -f deploy/docker-compose.yml up -d --build
 - Web UI / viewer — позже
 - Encryption at rest — полагаемся на изоляцию Docker Desktop named volume и опциональный bearer token на HTTP
 - Knowledge graph entity extraction — фаза 5+
-- Replay сессий — фаза 5+
+- Web UI для replay сессий — фаза 5+; JSON replay API уже доступен через `/integrations/replay/session` и MCP `memory_replay`.
 - Поддержка агентов кроме Claude Code и OpenCode (Cursor, Cline, прочие) — MCP-tools технически могут работать, но capture/context/compaction требуют отдельный adapter.
 - Native (non-Docker) деплой — поддерживается через `--dev` флаг или env, но не первоклассный сценарий. Документация фокусируется на Docker.
 - Локальная LLM-компрессия через Ollama в самом mcb — возможно вернуть как fallback `[compaction].mode = "ollama_direct"` если потребуется, но не в дефолтных фазах

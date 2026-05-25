@@ -36,6 +36,31 @@ func NormalizeOpenCodeTool(raw []byte) (Event, error) {
 	}, nil
 }
 
+func NormalizeOpenCodeEvent(raw []byte) (Event, error) {
+	var in struct {
+		SessionID string          `json:"session_id"`
+		CWD       string          `json:"cwd"`
+		Kind      string          `json:"kind"`
+		Tool      string          `json:"tool"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return Event{}, fmt.Errorf("parse opencode event: %w", err)
+	}
+	if in.Kind == "" {
+		in.Kind = "opencode_event"
+	}
+	payload := in.Payload
+	if len(payload) == 0 {
+		var err error
+		payload, err = payloadWithoutSession(raw)
+		if err != nil {
+			return Event{}, fmt.Errorf("marshal opencode event payload: %w", err)
+		}
+	}
+	return Event{Agent: "opencode", ExternalSessionID: in.SessionID, CWD: in.CWD, Kind: in.Kind, Tool: in.Tool, PayloadJSON: payload}, nil
+}
+
 func NormalizeOpenCodeChat(raw []byte) (Event, error) {
 	var in struct {
 		SessionID string `json:"session_id"`

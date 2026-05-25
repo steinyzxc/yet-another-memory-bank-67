@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steinyzxc/yet-another-memory-bank-67/internal/replay"
 	mcbsearch "github.com/steinyzxc/yet-another-memory-bank-67/internal/search"
 	"github.com/steinyzxc/yet-another-memory-bank-67/internal/store"
 )
@@ -57,7 +58,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeRPC(w, req.ID, map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities": map[string]any{
-				"tools": map[string]any{"listChanged": false},
+				"tools":     map[string]any{"listChanged": false},
+				"resources": map[string]any{"listChanged": false},
+				"prompts":   map[string]any{"listChanged": false},
 			},
 			"serverInfo": map[string]any{"name": "mcb", "version": "dev"},
 		}, nil)
@@ -69,6 +72,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeRPC(w, req.ID, map[string]any{"resources": resources()}, nil)
 	case "resources/read":
 		result, err := s.readResource(r.Context(), req.Params)
+		if err != nil {
+			writeRPC(w, req.ID, nil, &rpcError{Code: -32602, Message: err.Error()})
+			return
+		}
+		writeRPC(w, req.ID, result, nil)
+	case "prompts/list":
+		writeRPC(w, req.ID, map[string]any{"prompts": prompts()}, nil)
+	case "prompts/get":
+		result, err := s.getPrompt(req.Params)
 		if err != nil {
 			writeRPC(w, req.ID, nil, &rpcError{Code: -32602, Message: err.Error()})
 			return
@@ -139,6 +151,20 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) (map[string]
 		payload, err = s.memorySupersede(ctx, params.Arguments)
 	case "memory_update":
 		payload, err = s.memoryUpdate(ctx, params.Arguments)
+	case "memory_timeline":
+		payload, err = s.memoryTimeline(ctx, params.Arguments)
+	case "memory_file_history":
+		payload, err = s.memoryFileHistory(ctx, params.Arguments)
+	case "memory_patterns":
+		payload, err = s.memoryPatterns(ctx, params.Arguments)
+	case "memory_export":
+		payload, err = s.memoryExport(ctx, params.Arguments)
+	case "memory_audit":
+		payload, err = s.memoryAudit(ctx, params.Arguments)
+	case "memory_verify":
+		payload, err = s.memoryVerify(ctx, params.Arguments)
+	case "memory_replay":
+		payload, err = s.memoryReplay(ctx, params.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool %q", params.Name)
 	}
@@ -163,6 +189,15 @@ func (s *Server) readResource(ctx context.Context, raw json.RawMessage) (map[str
 	case strings.HasPrefix(in.URI, "mcb://project/") && strings.HasSuffix(in.URI, "/profile"):
 		project := strings.TrimSuffix(strings.TrimPrefix(in.URI, "mcb://project/"), "/profile")
 		payload, err = s.profilePayload(ctx, project)
+	case in.URI == "mcb://memories/latest":
+		memories, e := s.store.RecentMemories(ctx, s.project(""), 10)
+		payload, err = map[string]any{"memories": memoryDTOs(memories)}, e
+	case in.URI == "mcb://sessions/latest":
+		sessions, e := s.store.ListSessions(ctx, s.project(""), 10)
+		payload, err = map[string]any{"sessions": sessionDTOs(sessions)}, e
+	case in.URI == "mcb://audit/latest":
+		audit, e := s.store.AuditEvents(ctx, store.AuditFilter{Limit: 10})
+		payload, err = map[string]any{"audit": auditDTOs(audit)}, e
 	default:
 		return nil, fmt.Errorf("unknown resource %q", in.URI)
 	}
@@ -445,6 +480,112 @@ func (s *Server) memoryUpdate(ctx context.Context, raw json.RawMessage) (any, er
 	return map[string]any{"updated": true}, nil
 }
 
+func (s *Server) memoryTimeline(ctx context.Context, raw json.RawMessage) (any, error) {
+	var in struct {
+		Project   string `json:"project"`
+		SessionID string `json:"session_id"`
+		Limit     int    `json:"limit"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("invalid timeline arguments")
+	}
+	items, err := s.store.Timeline(ctx, store.TimelineFilter{Project: s.project(in.Project), SessionID: in.SessionID, Limit: in.Limit})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"timeline": timelineDTOs(items)}, nil
+}
+
+func (s *Server) memoryFileHistory(ctx context.Context, raw json.RawMessage) (any, error) {
+	var in struct {
+		Project string   `json:"project"`
+		Files   []string `json:"files"`
+		Limit   int      `json:"limit"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil || len(in.Files) == 0 {
+		return nil, fmt.Errorf("files are required")
+	}
+	history, err := s.store.FileHistory(ctx, store.FileHistoryFilter{Project: s.project(in.Project), Files: in.Files, Limit: in.Limit})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"memories": memoryDTOs(history.Memories), "observations": observationDTOs(history.Observations)}, nil
+}
+
+func (s *Server) memoryPatterns(ctx context.Context, raw json.RawMessage) (any, error) {
+	var in struct {
+		Project string `json:"project"`
+		Limit   int    `json:"limit"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("invalid patterns arguments")
+	}
+	patterns, err := s.store.Patterns(ctx, store.PatternFilter{Project: s.project(in.Project), Limit: in.Limit})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"top_tools": patterns.TopTools, "top_kinds": patterns.TopKinds, "files": patterns.Files}, nil
+}
+
+func (s *Server) memoryExport(ctx context.Context, raw json.RawMessage) (any, error) {
+	var in struct {
+		Project string `json:"project"`
+		Limit   int    `json:"limit"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("invalid export arguments")
+	}
+	exported, err := s.store.Export(ctx, store.ExportFilter{Project: s.project(in.Project), Limit: in.Limit})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"memories": memoryDTOs(exported.Memories), "sessions": sessionDTOs(exported.Sessions), "observations": observationDTOs(exported.Observations)}, nil
+}
+
+func (s *Server) memoryAudit(ctx context.Context, raw json.RawMessage) (any, error) {
+	var in struct {
+		MemoryID int64 `json:"memory_id"`
+		Limit    int   `json:"limit"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("invalid audit arguments")
+	}
+	events, err := s.store.AuditEvents(ctx, store.AuditFilter{MemoryID: in.MemoryID, Limit: in.Limit})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"audit": auditDTOs(events)}, nil
+}
+
+func (s *Server) memoryVerify(ctx context.Context, raw json.RawMessage) (any, error) {
+	var in struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil || in.ID <= 0 {
+		return nil, fmt.Errorf("id is required")
+	}
+	verified, err := s.store.VerifyMemory(ctx, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"memory": memoryDTOs([]store.Memory{verified.Memory})[0], "observations": observationDTOs(verified.Observations), "audit": auditDTOs(verified.Audit)}, nil
+}
+
+func (s *Server) memoryReplay(ctx context.Context, raw json.RawMessage) (any, error) {
+	var in struct {
+		SessionID string `json:"session_id"`
+		Limit     int    `json:"limit"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil || in.SessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+	observations, err := s.store.ListSessionObservations(ctx, in.SessionID, normalizedLimit(in.Limit, 100, 1000))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"events": replay.Records(observations)}, nil
+}
+
 func (s *Server) project(value string) string {
 	if value != "" {
 		return value
@@ -526,6 +667,84 @@ func observationDTOs(observations []store.Observation) []map[string]any {
 	return results
 }
 
+func timelineDTOs(items []store.TimelineItem) []map[string]any {
+	results := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		var payload any
+		if len(item.PayloadJSON) > 0 {
+			if err := json.Unmarshal(item.PayloadJSON, &payload); err != nil {
+				payload = string(item.PayloadJSON)
+			}
+		}
+		results = append(results, map[string]any{
+			"type":       item.Type,
+			"id":         item.ID,
+			"project":    item.Project,
+			"session_id": item.SessionID,
+			"ts":         item.TS,
+			"kind":       item.Kind,
+			"tool":       item.Tool,
+			"text":       item.Text,
+			"payload":    payload,
+		})
+	}
+	return results
+}
+
+func auditDTOs(events []store.AuditEvent) []map[string]any {
+	results := make([]map[string]any, 0, len(events))
+	for _, event := range events {
+		var payload any
+		if err := json.Unmarshal([]byte(event.Payload), &payload); err != nil {
+			payload = event.Payload
+		}
+		results = append(results, map[string]any{
+			"id":         event.ID,
+			"ts":         event.TS,
+			"action":     event.Action,
+			"memory_id":  event.MemoryID,
+			"session_id": event.SessionID,
+			"project":    event.Project,
+			"payload":    payload,
+		})
+	}
+	return results
+}
+
+func prompts() []map[string]any {
+	return []map[string]any{
+		{"name": "recall_context", "description": "Search mcb memory and produce compact task context.", "arguments": []map[string]any{{"name": "query", "description": "Task or question to recall context for.", "required": true}}},
+		{"name": "session_handoff", "description": "Prepare a concise handoff summary for another agent or future session.", "arguments": []map[string]any{{"name": "session_id", "description": "Normalized session ID to summarize.", "required": false}}},
+	}
+}
+
+func (s *Server) getPrompt(raw json.RawMessage) (map[string]any, error) {
+	var in struct {
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil || in.Name == "" {
+		return nil, fmt.Errorf("prompt name is required")
+	}
+	switch in.Name {
+	case "recall_context":
+		query, _ := in.Arguments["query"].(string)
+		if strings.TrimSpace(query) == "" {
+			return nil, fmt.Errorf("query is required")
+		}
+		return promptMessages("recall_context", fmt.Sprintf("Search mcb memory for %q. Return only durable facts relevant to the current task, with memory IDs when available.", query)), nil
+	case "session_handoff":
+		sessionID, _ := in.Arguments["session_id"].(string)
+		return promptMessages("session_handoff", fmt.Sprintf("Prepare a concise handoff for session %q. Include completed work, decisions, unresolved risks, and durable facts worth saving to mcb.", sessionID)), nil
+	default:
+		return nil, fmt.Errorf("unknown prompt %q", in.Name)
+	}
+}
+
+func promptMessages(name, text string) map[string]any {
+	return map[string]any{"description": name, "messages": []map[string]any{{"role": "user", "content": map[string]any{"type": "text", "text": text}}}}
+}
+
 func tools() []map[string]any {
 	return []map[string]any{
 		tool("memory_recall", "Search project memories and refresh access metadata for returned memories.", map[string]any{"query": schemaString(true), "project": schemaString(false), "limit": schemaInteger(false)}),
@@ -538,6 +757,13 @@ func tools() []map[string]any {
 		tool("memory_session_summary_save", "Save a concise compaction summary for a captured session.", map[string]any{"session_id": schemaString(true), "summary": schemaString(true)}),
 		tool("memory_supersede", "Mark an old memory as superseded by a newer memory.", map[string]any{"old_id": schemaInteger(true), "new_id": schemaInteger(true)}),
 		tool("memory_update", "Edit an existing memory's text, tier, or importance.", map[string]any{"id": schemaInteger(true), "text": schemaString(false), "tier": schemaString(false), "importance": schemaNumber(false)}),
+		tool("memory_timeline", "Return chronological memories and observations for a project or session.", map[string]any{"project": schemaString(false), "session_id": schemaString(false), "limit": schemaInteger(false)}),
+		tool("memory_file_history", "Return memories and observations related to file paths.", map[string]any{"project": schemaString(false), "files": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "x-required": true}, "limit": schemaInteger(false)}),
+		tool("memory_patterns", "Aggregate recurring tools, observation kinds, and files for a project.", map[string]any{"project": schemaString(false), "limit": schemaInteger(false)}),
+		tool("memory_export", "Export project memories, sessions, and observations as JSON.", map[string]any{"project": schemaString(false), "limit": schemaInteger(false)}),
+		tool("memory_audit", "List memory mutation audit events.", map[string]any{"memory_id": schemaInteger(false), "limit": schemaInteger(false)}),
+		tool("memory_verify", "Trace a memory back to source session observations and audit events.", map[string]any{"id": schemaInteger(true)}),
+		tool("memory_replay", "Return ordered replay records for a captured session.", map[string]any{"session_id": schemaString(true), "limit": schemaInteger(false)}),
 	}
 }
 
@@ -545,6 +771,9 @@ func resources() []map[string]any {
 	return []map[string]any{
 		{"uri": "mcb://status", "name": "mcb status", "mimeType": "application/json", "description": "Counts and status for the memory bank."},
 		{"uri": "mcb://project/{project}/profile", "name": "project profile", "mimeType": "application/json", "description": "Aggregate memory and capture statistics for one project."},
+		{"uri": "mcb://memories/latest", "name": "latest memories", "mimeType": "application/json", "description": "Latest active memories for the default project."},
+		{"uri": "mcb://sessions/latest", "name": "latest sessions", "mimeType": "application/json", "description": "Latest sessions for the default project."},
+		{"uri": "mcb://audit/latest", "name": "latest audit events", "mimeType": "application/json", "description": "Latest memory mutation audit events."},
 	}
 }
 

@@ -55,18 +55,10 @@ LIMIT ?
 
 	var observations []Observation
 	for rows.Next() {
-		var obs Observation
-		var tool sql.NullString
-		var payload []byte
-		if err := rows.Scan(&obs.ID, &obs.SessionID, &obs.CWD, &obs.TS, &obs.Kind, &tool, &payload, &obs.PayloadEncoding, &obs.PayloadLen, &obs.SchemaVersion, &obs.Hash); err != nil {
-			return nil, fmt.Errorf("scan observation: %w", err)
-		}
-		obs.Tool = tool.String
-		decoded, err := decodePayload(payload, obs.PayloadEncoding)
+		obs, err := scanObservation(rows)
 		if err != nil {
 			return nil, err
 		}
-		obs.PayloadJSON = decoded
 		observations = append(observations, obs)
 	}
 	if err := rows.Err(); err != nil {
@@ -105,6 +97,11 @@ func (s *Store) DeleteMemories(ctx context.Context, ids []int64) (int64, error) 
 			return 0, fmt.Errorf("delete memory %d rows affected: %w", id, err)
 		}
 		deleted += n
+		if n > 0 {
+			if err := s.insertAuditTx(ctx, tx, AuditEvent{Action: "memory_delete", MemoryID: id, Payload: auditPayload(map[string]any{"explicit": true})}); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit delete memories: %w", err)

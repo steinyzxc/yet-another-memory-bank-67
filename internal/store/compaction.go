@@ -120,7 +120,17 @@ func (s *Store) SupersedeMemory(ctx context.Context, oldID, newID int64) error {
 	if oldID <= 0 || newID <= 0 || oldID == newID {
 		return fmt.Errorf("invalid supersession ids")
 	}
-	result, err := s.writeDB.ExecContext(ctx, `UPDATE memories SET superseded_by = ? WHERE id = ?`, newID, oldID)
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin supersede memory: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	result, err := tx.ExecContext(ctx, `UPDATE memories SET superseded_by = ? WHERE id = ?`, newID, oldID)
 	if err != nil {
 		return fmt.Errorf("supersede memory: %w", err)
 	}
@@ -131,6 +141,13 @@ func (s *Store) SupersedeMemory(ctx context.Context, oldID, newID int64) error {
 	if changed == 0 {
 		return fmt.Errorf("memory %d not found", oldID)
 	}
+	if err := s.insertAuditTx(ctx, tx, AuditEvent{Action: "memory_supersede", MemoryID: oldID, Payload: auditPayload(map[string]any{"new_id": newID})}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit supersede memory: %w", err)
+	}
+	committed = true
 	return nil
 }
 

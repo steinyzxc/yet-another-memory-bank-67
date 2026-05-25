@@ -31,6 +31,82 @@ func TestOpenCodeToolEndpointStoresObservation(t *testing.T) {
 	}
 }
 
+func TestClaudeAdditionalHookEndpointsStoreObservations(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	h := New(s)
+
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+		kind string
+		tool string
+	}{
+		{name: "pre tool", path: "/hooks/pre-tool", body: `{"session_id":"s1","cwd":"/repo","tool_name":"Read","tool_input":{"file_path":"a.go"}}`, kind: "pre_tool_use", tool: "Read"},
+		{name: "post tool failure", path: "/hooks/post-tool-failure", body: `{"session_id":"s1","cwd":"/repo","tool_name":"Read","tool_input":{"file_path":"missing.go"},"tool_response":{"error":"not found"}}`, kind: "tool_error", tool: "Read"},
+		{name: "subagent start", path: "/hooks/subagent-start", body: `{"session_id":"s1","cwd":"/repo","subagent_name":"mcb-compactor"}`, kind: "subagent_start"},
+		{name: "notification", path: "/hooks/notification", body: `{"session_id":"s1","cwd":"/repo","message":"permission needed"}`, kind: "notification"},
+		{name: "task completed", path: "/hooks/task-completed", body: `{"session_id":"s1","cwd":"/repo","task":"tests","status":"completed"}`, kind: "task_completed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	observations, err := s.ListSessionObservations(t.Context(), "claude-code:s1", 10)
+	if err != nil {
+		t.Fatalf("list observations: %v", err)
+	}
+	if len(observations) != 5 {
+		t.Fatalf("observations = %d", len(observations))
+	}
+	for i, tc := range []struct {
+		kind string
+		tool string
+	}{
+		{kind: "pre_tool_use", tool: "Read"},
+		{kind: "tool_error", tool: "Read"},
+		{kind: "subagent_start"},
+		{kind: "notification"},
+		{kind: "task_completed"},
+	} {
+		if observations[i].Kind != tc.kind || observations[i].Tool != tc.tool {
+			t.Fatalf("observation[%d] = kind %q tool %q", i, observations[i].Kind, observations[i].Tool)
+		}
+	}
+}
+
+func TestOpenCodeEventEndpointStoresObservation(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/integrations/opencode/event", strings.NewReader(`{"session_id":"o1","cwd":"/repo","kind":"session_status","payload":{"status_type":"idle"}}`))
+	New(s).ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	observations, err := s.ListSessionObservations(t.Context(), "opencode:o1", 10)
+	if err != nil {
+		t.Fatalf("list observations: %v", err)
+	}
+	if len(observations) != 1 || observations[0].Kind != "session_status" {
+		t.Fatalf("observations = %+v", observations)
+	}
+}
+
 func TestReadyzChecksStore(t *testing.T) {
 	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
 	if err != nil {
@@ -156,6 +232,69 @@ func TestOpenCodeContextReturnsRecentMemoryContext(t *testing.T) {
 	}
 }
 
+func TestClaudePreCompactStoresObservationAndReturnsContext(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	_, err = s.AddMemory(t.Context(), store.MemoryInput{Project: "/repo", Text: "Preserve compaction context", CreatedAt: 1000})
+	if err != nil {
+		t.Fatalf("add memory: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/hooks/pre-compact", strings.NewReader(`{"session_id":"s1","cwd":"/repo","trigger":"manual"}`))
+	New(s).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if !strings.Contains(body.HookSpecificOutput.AdditionalContext, "Preserve compaction context") {
+		t.Fatalf("additionalContext = %q", body.HookSpecificOutput.AdditionalContext)
+	}
+	count, err := s.ObservationCount(t.Context(), "claude-code:s1")
+	if err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+func TestOpenCodeEnrichReturnsFileMemoryContext(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	_, err = s.AddMemory(t.Context(), store.MemoryInput{Project: "/repo", Text: "a.go uses table-driven tests", CreatedAt: 1000})
+	if err != nil {
+		t.Fatalf("add memory: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/integrations/opencode/enrich", strings.NewReader(`{"session_id":"o1","cwd":"/repo","files":["a.go"]}`))
+	New(s).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		AdditionalContext string `json:"additional_context"`
+		Context           string `json:"context"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if !strings.Contains(body.AdditionalContext, "a.go uses table-driven tests") || body.Context != body.AdditionalContext {
+		t.Fatalf("body = %+v", body)
+	}
+}
+
 func TestUserPromptEndpointsStoreObservations(t *testing.T) {
 	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
 	if err != nil {
@@ -203,6 +342,8 @@ func TestStopEndpointsEndSessions(t *testing.T) {
 		sessionID string
 	}{
 		{name: "claude stop", path: "/hooks/stop", body: `{"session_id":"s1","cwd":"/repo"}`, sessionID: "claude-code:s1"},
+		{name: "claude session end", path: "/hooks/session-end", body: `{"session_id":"s2","cwd":"/repo"}`, sessionID: "claude-code:s2"},
+		{name: "opencode session end", path: "/integrations/opencode/session-end", body: `{"session_id":"o1","cwd":"/repo"}`, sessionID: "opencode:o1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()

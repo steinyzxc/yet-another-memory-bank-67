@@ -92,6 +92,9 @@ VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?)
 			return 0, fmt.Errorf("insert memory fts: %w", err)
 		}
 	}
+	if err := s.insertAuditTx(ctx, tx, AuditEvent{TS: createdAt, Action: "memory_create", MemoryID: id, SessionID: in.SessionID, Project: in.Project, Payload: auditPayload(map[string]any{"tier": tier, "source": source})}); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit memory insert: %w", err)
 	}
@@ -178,6 +181,9 @@ func (s *Store) UpdateMemory(ctx context.Context, update MemoryUpdate) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO memories_fts (rowid, text) VALUES (?, ?)`, update.ID, *update.Text); err != nil {
 			return fmt.Errorf("insert updated memory fts: %w", err)
 		}
+	}
+	if err := s.insertAuditTx(ctx, tx, AuditEvent{TS: update.UpdatedAt, Action: "memory_update", MemoryID: update.ID, Payload: auditPayload(map[string]any{"text": update.Text != nil, "tier": update.Tier != nil, "importance": update.Importance != nil})}); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit memory update: %w", err)

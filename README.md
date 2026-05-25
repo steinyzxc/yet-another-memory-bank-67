@@ -1,6 +1,6 @@
 # Memory Claude Bank
 
-`mcb` is a local persistent memory layer for Claude Code and OpenCode. Phase 4 provides capture, manual memory save/search, BM25 lexical recall, optional Ollama embeddings, hybrid BM25+vector search, a Streamable HTTP MCP endpoint at `/mcp`, and agent-native session compaction orchestration.
+`mcb` is a local persistent memory layer for Claude Code and OpenCode. It provides capture, manual memory save/search, BM25 lexical recall, optional Ollama embeddings, hybrid BM25+vector search, transcript import, replay-friendly timelines, a Streamable HTTP MCP endpoint at `/mcp`, and agent-native session compaction orchestration.
 
 ## Quick Start
 
@@ -44,14 +44,29 @@ mcb embed-rebuild --db /var/lib/mcb/memory.db --project /path/to/project
 mcb compact --db /var/lib/mcb/memory.db --session claude-code:SESSION --agent claude-code
 mcb decay --db /var/lib/mcb/memory.db
 mcb sessions --db /var/lib/mcb/memory.db --project /path/to/project
+mcb import-jsonl --db /var/lib/mcb/memory.db ~/.claude/projects
 mcb backup --db /var/lib/mcb/memory.db --out backup.db
 mcb backup --db /var/lib/mcb/memory.db --out - > backup.db
 mcb doctor --db /var/lib/mcb/memory.db
 ```
 
+`import-jsonl` accepts one Claude transcript JSONL file or a directory tree. Imports are idempotent by transcript path plus event identity, preserve source timestamps when present, and redact known secret patterns before storage.
+
+## Replay API
+
+Replay records are available over HTTP and MCP for future viewers or agent handoffs:
+
+```bash
+curl -fsS http://127.0.0.1:3411/integrations/replay/session \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"claude-code:SESSION","limit":100}'
+```
+
+The response contains ordered `events` with stable IDs, timestamps, actor/type, tool name, `payload_preview`, and redacted `payload_detail`.
+
 ## Claude Code Hooks
 
-Use `deploy/claude-settings.example.json` as a merge reference for `~/.claude/settings.json`. The example configures remote MCP tools at `http://127.0.0.1:3411/mcp` and sends SessionStart, PostToolUse, UserPromptSubmit, Stop, and SubagentStop payloads to `http://127.0.0.1:3411`.
+Use `deploy/claude-settings.example.json` as a merge reference for `~/.claude/settings.json`. The example configures remote MCP tools at `http://127.0.0.1:3411/mcp` and sends 12 hook payloads to `http://127.0.0.1:3411`: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure, PreCompact, SubagentStart, SubagentStop, Notification, TaskCompleted, Stop, and SessionEnd.
 
 Copy `claude/agents/mcb-compactor.md` to `~/.claude/agents/mcb-compactor.md`. When enough observations exist, the Stop hook returns a `decision: block` instruction to dispatch that subagent. The subagent reads observations through MCP, saves one session summary, and stores durable facts.
 
@@ -59,7 +74,12 @@ If `MCB_BEARER_TOKEN` is set for the server, add `-H "Authorization: Bearer $MCB
 
 ## OpenCode
 
-Use `deploy/opencode.example.json` and `opencode/plugin/mcb.ts`. The example configures remote MCP tools at `http://127.0.0.1:3411/mcp`; the plugin posts context, tool, chat, and compact lifecycle events to mcb.
+Use `deploy/opencode.example.json` and `opencode/plugin/mcb.ts`. The example configures remote MCP tools at `http://127.0.0.1:3411/mcp`; the plugin posts context, tool, chat, session lifecycle, message, part, permission, todo, command, model/config, and compact lifecycle events to mcb. It also injects memory context and per-file enrichment through OpenCode system-transform hooks when available.
+
+Optional slash commands live in `opencode/commands/`:
+
+- `/recall <query>` searches mcb memory.
+- `/remember <text>` saves a durable memory.
 
 Install `opencode/agent/mcb-compactor.md` in the configured OpenCode agent directory. `/integrations/opencode/compact` returns a prompt for the plugin-driven compactor flow.
 
@@ -77,11 +97,26 @@ The `/mcp` endpoint supports these tools:
 - `memory_session_summary_save`: save a compactor summary for a session.
 - `memory_supersede`: mark an older memory as superseded by a newer one.
 - `memory_update`: edit an existing memory's text, tier, or importance.
+- `memory_timeline`: return chronological memories and observations.
+- `memory_file_history`: return memories and observations related to file paths.
+- `memory_patterns`: aggregate recurring tools, observation kinds, and files.
+- `memory_export`: export project memories, sessions, and observations as JSON.
+- `memory_audit`: list memory mutation audit events.
+- `memory_verify`: trace a memory to source session observations and audit events.
+- `memory_replay`: return ordered replay records for a session.
 
 The `/mcp` endpoint also exposes resources:
 
 - `mcb://status`: memory, session, and observation counts.
 - `mcb://project/{project}/profile`: aggregate profile for one project.
+- `mcb://memories/latest`: latest active memories for the default project.
+- `mcb://sessions/latest`: latest sessions for the default project.
+- `mcb://audit/latest`: latest mutation audit events.
+
+MCP prompts:
+
+- `recall_context`: generate a memory-recall prompt for the current task.
+- `session_handoff`: generate a concise handoff prompt for another agent or future session.
 
 ## Compaction And Decay
 
