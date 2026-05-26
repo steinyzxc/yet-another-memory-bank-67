@@ -1,4 +1,4 @@
-const baseURL = process.env.MCB_URL || "http://127.0.0.1:3411";
+const baseURL = normalizeBaseURL(process.env.MCB_URL || "http://127.0.0.1:3411");
 const bearerToken = process.env.MCB_BEARER_TOKEN || "";
 
 const fileTools = new Set(["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "read", "write", "edit", "glob", "grep"]);
@@ -11,18 +11,41 @@ const stashedFiles = new Map<string, Set<string>>();
 const contextInjectedSessions = new Set<string>();
 const seenToolCalls = new Map<string, Set<string>>();
 const seenSubtasks = new Map<string, Set<string>>();
+const warnedPostFailures = new Set<string>();
+
+function normalizeBaseURL(value: string) {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  return trimmed.endsWith("/mcp") ? trimmed.slice(0, -4) : trimmed;
+}
 
 async function post(path: string, body: unknown) {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
-  const response = await fetch(`${baseURL}${path}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) throw new Error(`mcb ${path} failed: ${response.status}`);
+  const url = `${baseURL}${path}`;
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    warnPostFailure(url, `network error: ${safeString(error, 500)}`);
+    return undefined;
+  }
+  if (!response.ok) {
+    warnPostFailure(url, `HTTP ${response.status}`);
+    return undefined;
+  }
   const text = await response.text();
   return text ? JSON.parse(text) : undefined;
+}
+
+function warnPostFailure(url: string, message: string) {
+  const key = `${url} ${message}`;
+  if (warnedPostFailures.has(key)) return;
+  warnedPostFailures.add(key);
+  console.warn(`[mcb] ${url} failed: ${message}`);
 }
 
 async function observe(sessionID: string | undefined, kind: string, payload: Record<string, unknown>, tool = "", cwd = projectPath) {

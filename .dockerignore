@@ -1,6 +1,7 @@
 .git
 .worktrees
 docs/superpowers
+data
 **/*_test.go
 test
 tmp

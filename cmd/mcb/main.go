@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -126,6 +127,7 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) int {
 			return nil
 		}
 	}
+	slog.Info("mcb server starting", "http", opts.http, "db", opts.dbPath, "embedding_provider", opts.embedding.Provider, "compaction_mode", opts.compaction.Mode)
 	handler := mcbserver.NewWithOptions(s, serverOpts)
 	if err := serveHTTP(ctx, opts.http, handler); err != nil {
 		fmt.Fprintf(stderr, "serve: %v\n", err)

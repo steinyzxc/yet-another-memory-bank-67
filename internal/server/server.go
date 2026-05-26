@@ -144,9 +144,11 @@ func NewWithOptions(s *store.Store, opts Options) http.Handler {
 }
 
 func capture(w http.ResponseWriter, r *http.Request, s *store.Store, opts Options, normalize func([]byte) (integrations.Event, error)) {
-	if _, ok := captureRaw(w, r, s, opts, normalize); !ok {
+	event, ok := captureRaw(w, r, s, opts, normalize)
+	if !ok {
 		return
 	}
+	slog.Info("captured integration event", "agent", event.Agent, "session_id", event.ExternalSessionID, "kind", event.Kind, "tool", event.Tool, "cwd", event.CWD)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -686,9 +688,80 @@ func authMiddleware(next http.Handler, bearerToken string) http.Handler {
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		slog.Debug("http request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		if isQuietHealthCheck(r.URL.Path, recorder.status) {
+			return
+		}
+		attrs := []any{
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", recorder.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"bytes", recorder.bytes,
+			"content_length", r.ContentLength,
+			"remote_addr", r.RemoteAddr,
+			"user_agent", r.UserAgent(),
+		}
+		if recorder.preview.Len() > 0 {
+			attrs = append(attrs, "response", strings.TrimSpace(recorder.preview.String()))
+		}
+		switch {
+		case recorder.status >= 500:
+			slog.Error("http request failed", attrs...)
+		case recorder.status >= 400:
+			slog.Warn("http request rejected", attrs...)
+		default:
+			slog.Info("http request", attrs...)
+		}
 	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status      int
+	bytes       int
+	wroteHeader bool
+	preview     strings.Builder
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	if r.wroteHeader {
+		return
+	}
+	r.status = status
+	r.wroteHeader = true
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(data []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	if r.preview.Len() < 512 {
+		remaining := 512 - r.preview.Len()
+		if len(data) < remaining {
+			remaining = len(data)
+		}
+		r.preview.Write(data[:remaining])
+	}
+	n, err := r.ResponseWriter.Write(data)
+	r.bytes += n
+	return n, err
+}
+
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
+func isQuietHealthCheck(path string, status int) bool {
+	return status < 400 && (path == "/healthz" || path == "/readyz")
 }
 
 func recoverMiddleware(next http.Handler) http.Handler {

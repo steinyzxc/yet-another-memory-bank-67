@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -28,6 +30,30 @@ func TestOpenCodeToolEndpointStoresObservation(t *testing.T) {
 	count, err := s.ObservationCount(t.Context(), "opencode:o1")
 	if err != nil || count != 1 {
 		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+func TestHTTPLoggingIncludesRejectedRequests(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/integrations/opencode/event", nil)
+	New(s).ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	text := logs.String()
+	if !strings.Contains(text, "http request rejected") || !strings.Contains(text, "path=/integrations/opencode/event") || !strings.Contains(text, "status=405") {
+		t.Fatalf("logs = %s", text)
 	}
 }
 
