@@ -61,6 +61,8 @@ func Run(ctx context.Context, args []string, io IO) int {
 		return runImportJSONL(ctx, args[1:], io)
 	case "bench":
 		return runBench(ctx, args[1:], io)
+	case "perf-seed":
+		return runPerfSeed(ctx, args[1:], io)
 	default:
 		fmt.Fprintf(io.Stderr, "unsupported command %q\n", args[0])
 		return 2

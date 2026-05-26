@@ -21,30 +21,31 @@ type ObservationInput struct {
 }
 
 func (s *Store) InsertObservation(ctx context.Context, in ObservationInput, dedupWindowSeconds int64) (bool, error) {
-	if _, err := s.writeDB.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
 		return false, fmt.Errorf("begin observation insert: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = s.writeDB.ExecContext(ctx, `ROLLBACK`)
+			_ = tx.Rollback()
 		}
 	}()
 
-	sessionID, err := s.EnsureSession(ctx, in.Agent, in.ExternalSessionID, in.CWD, in.TS)
+	sessionID, err := ensureSession(ctx, tx, in.Agent, in.ExternalSessionID, in.CWD, in.TS)
 	if err != nil {
 		return false, err
 	}
 
 	var exists int
-	err = s.writeDB.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 SELECT 1
 FROM observations
 WHERE hash = ? AND ts > ?
 LIMIT 1
 `, in.Hash, in.TS-dedupWindowSeconds*1000).Scan(&exists)
 	if err == nil {
-		if _, err := s.writeDB.ExecContext(ctx, `COMMIT`); err != nil {
+		if err := tx.Commit(); err != nil {
 			return false, fmt.Errorf("commit observation dedup: %w", err)
 		}
 		committed = true
@@ -58,18 +59,18 @@ LIMIT 1
 	if err != nil {
 		return false, err
 	}
-	_, err = s.writeDB.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 INSERT INTO observations (session_id, cwd, ts, kind, tool, payload, payload_len, payload_encoding, schema_version, hash)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, sessionID, in.CWD, in.TS, in.Kind, in.Tool, payload, len(in.PayloadJSON), encoding, 1, in.Hash)
 	if err != nil {
 		return false, fmt.Errorf("insert observation: %w", err)
 	}
-	_, err = s.writeDB.ExecContext(ctx, `UPDATE sessions SET n_obs = n_obs + 1 WHERE id = ?`, sessionID)
+	_, err = tx.ExecContext(ctx, `UPDATE sessions SET n_obs = n_obs + 1 WHERE id = ?`, sessionID)
 	if err != nil {
 		return false, fmt.Errorf("increment observation count: %w", err)
 	}
-	if _, err := s.writeDB.ExecContext(ctx, `COMMIT`); err != nil {
+	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit observation insert: %w", err)
 	}
 	committed = true

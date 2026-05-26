@@ -18,8 +18,16 @@ type Session struct {
 }
 
 func (s *Store) EnsureSession(ctx context.Context, agent, externalID, project string, ts int64) (string, error) {
+	return ensureSession(ctx, s.writeDB, agent, externalID, project, ts)
+}
+
+type sessionExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func ensureSession(ctx context.Context, execer sessionExecer, agent, externalID, project string, ts int64) (string, error) {
 	id := agent + ":" + externalID
-	_, err := s.writeDB.ExecContext(ctx, `
+	_, err := execer.ExecContext(ctx, `
 INSERT INTO sessions (id, agent, external_id, project, started_at, n_obs)
 VALUES (?, ?, ?, ?, ?, 0)
 ON CONFLICT(agent, external_id) DO NOTHING

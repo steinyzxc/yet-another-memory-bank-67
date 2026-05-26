@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -28,6 +30,58 @@ func TestEnsureSessionCreatesNormalizedSession(t *testing.T) {
 	}
 	if got.Agent != "opencode" || got.ExternalID != "raw-123" || got.Project != "/repo" {
 		t.Fatalf("unexpected session: %+v", got)
+	}
+}
+
+func TestInsertObservationHandlesConcurrentWrites(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	const n = 100
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inserted, err := s.InsertObservation(ctx, ObservationInput{
+				Agent:             "opencode",
+				ExternalSessionID: fmt.Sprintf("concurrent-%03d", i),
+				CWD:               "/repo",
+				TS:                int64(1000 + i),
+				Kind:              "tool_use",
+				Tool:              "Read",
+				PayloadJSON:       []byte(fmt.Sprintf(`{"i":%d}`, i)),
+				Hash:              fmt.Sprintf("hash-%03d", i),
+			}, 300)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !inserted {
+				errs <- fmt.Errorf("observation %d was deduplicated", i)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("insert observation: %v", err)
+		}
+	}
+
+	var count int
+	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM observations WHERE cwd = ?`, "/repo").Scan(&count); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if count != n {
+		t.Fatalf("observation count = %d, want %d", count, n)
 	}
 }
 

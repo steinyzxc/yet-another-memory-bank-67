@@ -62,3 +62,28 @@ func TestRunBenchRejectsInvalidLimit(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, io.Stderr)
 	}
 }
+
+func TestParseBenchPerfOptions(t *testing.T) {
+	opts, rest, err := parseBenchOptions([]string{
+		"--url", "http://127.0.0.1:3411",
+		"--project=/mcb-perf/dev",
+		"--run-id", "run-a",
+		"--requests=25",
+		"--concurrency", "1,10,50",
+		"--groups=capture,mcp",
+		"--fail-on-budget",
+		"--out", "/tmp/out",
+	})
+	if err != nil || len(rest) != 0 {
+		t.Fatalf("opts=%+v rest=%+v err=%v", opts, rest, err)
+	}
+	if opts.url != "http://127.0.0.1:3411" || opts.project != "/mcb-perf/dev" || opts.runID != "run-a" || opts.requests != 25 || opts.outDir != "/tmp/out" || !opts.failOnBudget {
+		t.Fatalf("opts = %+v", opts)
+	}
+	if got := strings.Join(opts.groups, ","); got != "capture,mcp" {
+		t.Fatalf("groups = %q", got)
+	}
+	if len(opts.concurrency) != 3 || opts.concurrency[0] != 1 || opts.concurrency[1] != 10 || opts.concurrency[2] != 50 {
+		t.Fatalf("concurrency = %+v", opts.concurrency)
+	}
+}

@@ -183,7 +183,7 @@ SQLite open policy:
 
 - DSN включает `_foreign_keys=1` и `_busy_timeout=5000`, потому что `PRAGMA foreign_keys = ON` действует per connection.
 - Store использует отдельные handles: `writeDB` с `SetMaxOpenConns(1)` для всех write transaction и `readDB` с небольшим read pool для search/admin reads. Это проще и надёжнее для SQLite WAL, чем общий пул под concurrent hooks.
-- Write-path транзакции открываются как `BEGIN IMMEDIATE`, чтобы dedup check + insert были сериализованы и не ловили race между параллельными hooks.
+- Capture write-path открывает обычный `*sql.Tx` на single-connection `writeDB`; `EnsureSession`, dedup check, insert и `n_obs` update выполняются на том же transaction handle, чтобы параллельные hooks не перемешивали SQL-операции.
 - Admin read-only команды (`search`, `sessions`, `export`) открывают БД read-only и выставляют `PRAGMA query_only = ON`.
 
 Migration policy: в `001_init.sql` можно использовать `NOT NULL` без `DEFAULT`, потому что БД пустая. В будущих миграциях для существующих таблиц `ADD COLUMN ... NOT NULL` только с `DEFAULT` или через copy-table migration.
@@ -625,7 +625,7 @@ ON CONFLICT(id) DO UPDATE SET
 `PostToolUse` flow:
 
 1. Прочитать stdin JSON, распарсить.
-2. Открыть write transaction через `BEGIN IMMEDIATE`.
+2. Открыть write transaction на single-connection `writeDB`.
 3. Adapter нормализует payload в общий event shape: `agent`, `raw_session_id`, normalized `session_id`, `cwd`, `kind`, `tool`, `payload`.
 4. `EnsureSession(agent, raw_session_id, cwd, ts)`.
 5. Канонизировать `tool_input` + `tool_response` (отсортировать ключи, нормализовать пробелы).
@@ -937,7 +937,7 @@ eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}   # JWT
 3. `json.Marshal` обратно. Для `map[string]...` Go `encoding/json` уже сортирует keys детерминированно; ручная нормализация всё ещё нужна для чисел, `map[string]any`, массивов и стабильного отброса/нормализации нерелевантных полей.
 4. `sha256.Sum256(canonical)` → hex.
 
-`hash` не UNIQUE: дедуп должен быть windowed, а не глобальный навсегда. Алгоритм выполняется внутри `BEGIN IMMEDIATE` write transaction:
+`hash` не UNIQUE: дедуп должен быть windowed, а не глобальный навсегда. Алгоритм выполняется внутри capture write transaction:
 
 ```sql
 SELECT 1 FROM observations
@@ -945,7 +945,7 @@ WHERE hash = ? AND ts > ?
 LIMIT 1;
 ```
 
-Если запись есть в окне `dedup_window_seconds` — не вставлять observation. Если совпадение старше окна — вставить новую строку, чтобы повторяющиеся события оставались видны в аудите. `BEGIN IMMEDIATE` нужен, чтобы два параллельных одинаковых hook'а не прошли check одновременно.
+Если запись есть в окне `dedup_window_seconds` — не вставлять observation. Если совпадение старше окна — вставить новую строку, чтобы повторяющиеся события оставались видны в аудите. Single-connection write transaction нужен, чтобы два параллельных одинаковых hook'а не прошли check одновременно.
 
 ## Memory tiers и decay
 
@@ -958,10 +958,12 @@ LIMIT 1;
 
 ## Benchmarks
 
-Benchmark commands are retrieval-only and sandboxed:
+Retrieval benchmark commands are sandboxed:
 
 - `mcb bench coding-life --out DIR` seeds a clean-room coding-agent corpus into `DIR/sandbox.db` and writes `raw.ndjson`, `summary.json`, and `scorecard.md`.
 - `mcb bench longmemeval --dataset PATH --out DIR [--limit N]` runs the harness against a user-supplied native LongMemEval-S JSON or JSONL export. It skips `_abs` abstention question types, builds a fresh per-question index from `haystack_sessions`, and reports recall_any@5/10/20, MRR, and NDCG@10.
+
+Live performance benchmarks are explicit two-step commands. `mcb perf-seed --db DB --project PROJECT --run-id RUN` seeds deterministic generated data into the real SQLite DB, and `mcb bench perf --url URL --project PROJECT --run-id RUN --out DIR` measures capture, context, compaction, replay, and MCP latency against the running HTTP server. Docker orchestration stays outside the Go benchmark command.
 
 Benchmark scorecards compare `mcb local run` against `agentmemory published reference` numbers when available. They do not copy upstream fixtures and do not run `agentmemory` locally by default. `coding-life-cleanroom` is intentionally not the same corpus as upstream `coding-agent-life-v1`; scorecards must label this difference. LongMemEval scorecards record dataset file name, source URL, row counts, bytes, and SHA-256 before claiming same-dataset comparability.
 

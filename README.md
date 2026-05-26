@@ -47,6 +47,8 @@ mcb sessions --db /var/lib/mcb/memory.db --project /path/to/project
 mcb import-jsonl --db /var/lib/mcb/memory.db ~/.claude/projects
 mcb bench coding-life --out /tmp/mcb-coding-life
 mcb bench longmemeval --dataset /path/to/longmemeval-s.json --out /tmp/mcb-longmemeval --limit 50
+mcb perf-seed --db /var/lib/mcb/memory.db --project /mcb-perf/dev --run-id smoke --memories 10000 --observations 100000 --sessions 100
+mcb bench perf --url http://127.0.0.1:3411 --project /mcb-perf/dev --run-id smoke --out /tmp/mcb-perf --concurrency 1,10,50 --requests 1000
 mcb backup --db /var/lib/mcb/memory.db --out backup.db
 mcb backup --db /var/lib/mcb/memory.db --out - > backup.db
 mcb doctor --db /var/lib/mcb/memory.db
@@ -71,6 +73,22 @@ The response contains ordered `events` with stable IDs, timestamps, actor/type, 
 `mcb bench coding-life` runs a bundled clean-room coding-agent retrieval corpus in a sandboxed SQLite database and writes `raw.ndjson`, `summary.json`, `scorecard.md`, and `sandbox.db` to the output directory.
 
 `mcb bench longmemeval --dataset PATH` runs the retrieval-only harness against a user-supplied native LongMemEval-S JSON or JSONL export. Each answerable row must provide `question_id`, `question_type`, `question`, `answer_session_ids`, `haystack_session_ids`, and `haystack_sessions`. Abstention question types ending in `_abs` are skipped, each question is evaluated against a fresh index containing only its haystack sessions, and `--limit N` can be used for smoke runs. No dataset is bundled.
+
+`mcb perf-seed` writes deterministic synthetic sessions, observations, memories, and summaries directly into SQLite for a disposable project namespace. `mcb bench perf` then measures live HTTP latency against the running server for capture, context, compaction, replay, and MCP groups, writing `raw.ndjson`, `summary.json`, and `scorecard.md`. Use the same `--project` and `--run-id` for seed and benchmark:
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ollama.yml exec mcb \
+  mcb perf-seed --db /var/lib/mcb/memory.db --project /mcb-perf/dev --run-id smoke --memories 10000 --observations 100000 --sessions 100
+
+mcb bench perf --url http://127.0.0.1:3411 --project /mcb-perf/dev --run-id smoke --out /tmp/mcb-perf --concurrency 1,10,50 --requests 1000
+```
+
+For hybrid/Ollama MCP timings, prepare embeddings after seeding:
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ollama.yml exec mcb \
+  mcb embed-missing --db /var/lib/mcb/memory.db --project /mcb-perf/dev
+```
 
 Scorecards compare `mcb local run` against `agentmemory published reference` numbers where available. The coding-life corpus is not the upstream `agentmemory` corpus and the reference is not a same-run baseline. See `docs/benchmarks/2026-05-26-coding-life.md`, `docs/benchmarks/2026-05-26-longmemeval.md`, and `docs/benchmarks/2026-05-26-pre-benchmark-gap-audit.md`.
 

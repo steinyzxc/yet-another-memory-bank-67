@@ -43,6 +43,28 @@ Measure p50, p90, p95, p99.
 
 Hard budget from the architecture: hook capture should stay below 100 ms p95 on an empty or small DB. Search should stay human-invisible for interactive use; target p95 below 150 ms excluding Ollama cold starts.
 
+The live HTTP performance workflow uses two commands. Seed a disposable namespace inside the container so the benchmark uses the real SQLite volume:
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ollama.yml exec mcb \
+  mcb perf-seed --db /var/lib/mcb/memory.db --project /mcb-perf/dev --run-id smoke --memories 10000 --observations 100000 --sessions 100
+```
+
+Then run the benchmark from the host against the live server:
+
+```bash
+mcb bench perf --url http://127.0.0.1:3411 --project /mcb-perf/dev --run-id smoke --out /tmp/mcb-perf --concurrency 1,10,50 --requests 1000
+```
+
+Use the same `--project` and `--run-id` for both commands. Re-running `perf-seed` with the same pair replaces only that generated seed data; other projects and run IDs are left intact. The report files are `raw.ndjson`, `summary.json`, and `scorecard.md`. Budgets are warnings unless `--fail-on-budget` is passed.
+
+For hybrid MCP timings with Ollama, populate embeddings after seeding:
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ollama.yml exec mcb \
+  mcb embed-missing --db /var/lib/mcb/memory.db --project /mcb-perf/dev
+```
+
 ### Agent Outcome Quality
 
 Use task-level evaluations, not just search metrics.
@@ -143,7 +165,7 @@ bench/
     └── .gitkeep
 ```
 
-The harness should:
+The retrieval harness should:
 
 1. create a temp SQLite DB
 2. load memories/sessions/observations
@@ -152,6 +174,8 @@ The harness should:
 5. run HTTP endpoint latency checks against a live `mcb serve`
 6. write JSONL results
 7. print a concise markdown summary
+
+The live performance harness is implemented by `mcb perf-seed` and `mcb bench perf`; it does not orchestrate Docker and intentionally measures the already-running server.
 
 Recommended output schema per query:
 
